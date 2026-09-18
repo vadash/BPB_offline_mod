@@ -1,0 +1,37 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=4
+
+_global_script_classes=[ {
+"base": "Reference",
+"class": "RunData",
+"language": "GDScript",
+"path": "res://stubs/run_data_stub.gd"
+}, {
+"base": "Node",
+"class": "SteamLeaderboard",
+"language": "GDScript",
+"path": "res://Core/SteamWorkshop.gd"
+} ]
+_global_script_class_icons={
+"RunData": "",
+"SteamLeaderboard": ""
+}
+
+[application]
+
+config/name="bpb-tests"
+run/main_scene="res://check.tscn"
+
+[autoload]
+
+RunDatabase="*res://stubs/run_database_stub.gd"
+SteamHelper="*res://stubs/steam_helper_stub.gd"
+Game="*res://stubs/game_stub.gd"
+ItemBook="*res://stubs/item_book_stub.gd"

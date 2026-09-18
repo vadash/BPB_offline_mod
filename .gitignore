@@ -1,0 +1,16 @@
+/seeder/obj/
+/seeder/bin/
+/merge/bin/
+/merge/obj/
+
+/logs/
+
+nul
+
+# Godot test harness: generated Core copies, editor cache, staged DLLs
+/mod/tests/Core/
+/mod/tests/.godot/
+/mod/tests/.import/
+
+# GDRE extraction of game pck (copyrighted game code; never commit)
+/.gdre/
