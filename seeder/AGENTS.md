@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 dotnet build -c Release
 dotnet run -c Release -- --db path/to/output.gdb   # custom output path
 dotnet run -c Release -- --keep-d 4               # keep newest N version codes present in the data (default 4)
-dotnet run -c Release -- --cut-bottom 25          # rating floor: drop bottom P% by r (default 25; 0 = off)
+dotnet run -c Release -- --cut-bottom 50          # rating floor: drop bottom P% by r (default 50; 0 = off)
 dotnet run -c Release -- --merge path/to/folder   # merger: merge every top-level *.gdb in folder -> folder/ghosts-merged.gdb
 ```
 
@@ -25,7 +25,7 @@ Single-purpose CLI tool that scrapes the "bpb-runs3" Steam leaderboard, enriches
 1. **Init Steam** — P/Invokes `steam_api64.dll` via `Steam` static class. Tries `SteamAPI_InitFlat` first (newer SDK), falls back to `SteamAPI_InitSafe`. Gracefully handles `EntryPointNotFoundException` for version mismatches.
 2. **Fetch leaderboard** — Finds the leaderboard handle, then downloads entries in 5000-entry batches (4 concurrent requests) via async Steam callback polling (`SteamAPI_RunCallbacks` loop with `Thread.Sleep`).
 3. **Fetch UGC metadata** — For each distinct Workshop ID in the entries, queries UGC details in 1000-item batches (4 concurrent). Extracts metadata JSON strings from each item.
-4. **Filter & write** — Parses metadata (`r`, `d`), deduplicates by Steam ID, rejects rows without a numeric `r`, keeps only the newest `--keep-d` (default 4) version codes present in the candidates, drops rows below the `--cut-bottom` (default 25) percentile rating floor, then writes the `BGDB` v1 binary layout (gzip-compressed metadata blobs, two-pass via `<final>.tmp` + atomic `File.Move`).
+4. **Filter & write** — Parses metadata (`r`, `d`), deduplicates by Steam ID, rejects rows without a numeric `r`, keeps only the newest `--keep-d` (default 4) version codes present in the candidates, drops rows below the `--cut-bottom` (default 50) percentile rating floor, then writes the `BGDB` v1 binary layout (gzip-compressed metadata blobs, two-pass via `<final>.tmp` + atomic `File.Move`).
 5. **Version report** — Prints per-version kept/cut/total counts after filtering.
 
 ### Merge flow (`--merge <folder>`)

@@ -21,7 +21,7 @@ internal class Program
 		bool dbFromFlag = false;
 		int keepD = 4;
 		bool keepDFromFlag = false;
-		int cutBottom = 25;
+		int cutBottom = 50;
 		bool cutBottomFromFlag = false;
 		for (int i = 0; i < args.Length; i++)
 		{
