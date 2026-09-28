@@ -12,3 +12,4 @@ using System.Security.Permissions;
 [assembly: AssemblyProduct("LeaderboardSeeder")]
 [assembly: AssemblyTitle("LeaderboardSeeder")]
 [assembly: AssemblyVersion("1.0.0.0")]
+[assembly: InternalsVisibleTo("LeaderboardSeeder.Tests")]

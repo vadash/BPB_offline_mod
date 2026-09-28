@@ -1,5 +1,7 @@
 /seeder/obj/
 /seeder/bin/
+/seeder/LeaderboardSeeder.Tests/bin/
+/seeder/LeaderboardSeeder.Tests/obj/
 /merge/bin/
 /merge/obj/
 

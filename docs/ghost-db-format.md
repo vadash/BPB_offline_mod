@@ -1,6 +1,6 @@
 # Ghost DB format (`ghosts.gdb`), version 1
 
-Produced by `seeder/` (only writer), consumed by the mod's `Core/GhostDb.gd`. Replaces the SQLite `full_dump.db` schema v1 (ADR 0003). Board payloads inside the metadata blobs use the encoding in `docs/board-format.md`.
+Produced by `seeder/` — the seeder and its `--merge` merger write through the single writer code path (`LeaderboardSeeder/GhostDb.Write`); consumed by the mod's `Core/GhostDb.gd`. Replaces the SQLite `full_dump.db` schema v1 (ADR 0003). Board payloads inside the metadata blobs use the encoding in `docs/board-format.md`.
 
 ## Byte order
 

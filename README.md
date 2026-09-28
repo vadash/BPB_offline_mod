@@ -4,7 +4,7 @@ Offline ghost leaderboard for [Backpack Battles](https://store.steampowered.com/
 
 ## Components
 
-- **`seeder/`** — Steam leaderboard seeder. Builds a local ghost database (`ghosts.gdb`, BGDB v1 — see [docs/ghost-db-format.md](docs/ghost-db-format.md)). Build with `seeder/build.bat`.
+- **`seeder/`** — Steam leaderboard seeder. Builds a local ghost database (`ghosts.gdb`, BGDB v1 — see [docs/ghost-db-format.md](docs/ghost-db-format.md)). Build with `seeder/build.bat`. Also hosts the **merger**: `LeaderboardSeeder.exe --merge <folder>` merges every top-level `*.gdb` in a folder, drops re-seeded identical runs (same player, byte-identical data), keeps runs whose data differs, and writes `ghosts-merged.gdb` beside them. No re-filtering by default; `--keep-d`/`--cut-bottom` override.
 - **`mod/`** — Game mod. Replaces the game's Steam leaderboard I/O with the local ghost database; ships as a `mod.pck` override. Pack with `mod/Pack-ModPck.ps1`, deploy by copying `mod.pck` next to the game exe. See [mod/AGENTS.md](mod/AGENTS.md) for build, deploy, and validation steps.
 
 ## Documentation

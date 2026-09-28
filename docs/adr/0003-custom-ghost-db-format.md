@@ -12,6 +12,8 @@ One custom single-file format, `ghosts.gdb` (see `docs/ghost-db-format.md`): lit
 
 File drops to roughly a third (~170 MB) and the rank estimate becomes ~18 comparisons instead of a full-file scan. Both tools now own the byte layout; any change bumps `format_version` in the header and lands in both at once (clean cutover, no dual-format period). Compression is gzip on both ends from their standard libraries, so neither side gains a dependency.
 
+Later addition (2026-09): the Merger (`seeder --merge <folder>`) is a second writer of the format. It shares the seeder's writer code (`LeaderboardSeeder/GhostDb.Write`), so the layout stays single-sourced and version bumps still land in every writer at once.
+
 Considered options:
 
 - Tuned SQLite (index on `r`, drop dead columns, per-blob compressed BLOBs, VACUUM): rejected - keeps the `gdsqlite` dependency and per-call open/close overhead, floors around ~220 MB, and the rank estimate stays a `COUNT` scan.

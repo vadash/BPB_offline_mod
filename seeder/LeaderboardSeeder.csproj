@@ -19,4 +19,9 @@
   <ItemGroup>
     <None Include="steam_appid.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- nested test project would otherwise be pulled in by the default **/*.cs glob -->
+    <Compile Remove="LeaderboardSeeder.Tests\**" />
+  </ItemGroup>
 </Project>

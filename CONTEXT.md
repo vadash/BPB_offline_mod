@@ -9,7 +9,7 @@ One completed leaderboard performance. Carries run metadata.
 _Avoid_: entry, score (a score is only the number)
 
 **Run metadata**:
-JSON blob attached to every run; carries the Elo-like score `r` and the game version `d`.
+JSON blob attached to every run; carries the Elo-like score `r`, the game version `d`, the player name `p`, and the boards.
 _Avoid_: UGC metadata, preview
 
 **Board**:
@@ -31,6 +31,10 @@ _Avoid_: scraper, dumper
 **Mod**:
 The game-file override that replaces Steam leaderboard I/O with ghost-DB reads.
 _Avoid_: addon, patch, plugin
+
+**Merger**:
+Seeder mode that reads every ghost DB in one folder and writes one deduplicated merged ghost DB into that folder.
+_Avoid_: combiner, join
 
 **Player state sidecar**:
 The mod's persisted record of the player: score, rank estimate, sequence number, min-d cutoff.

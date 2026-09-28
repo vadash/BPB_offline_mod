@@ -17,6 +17,8 @@ internal class Program
 	private static int Main(string[] args)
 	{
 		string text = Path.Combine(Path.GetDirectoryName(Environment.ProcessPath) ?? ".", "ghosts.gdb");
+		string? mergeDir = null;
+		bool dbFromFlag = false;
 		int keepD = 4;
 		bool keepDFromFlag = false;
 		int cutBottom = 25;
@@ -26,6 +28,16 @@ internal class Program
 			if (args[i] == "--db" && i + 1 < args.Length)
 			{
 				text = args[++i];
+				dbFromFlag = true;
+			}
+			if (args[i] == "--merge")
+			{
+				if (i + 1 >= args.Length)
+				{
+					Console.Error.WriteLine("[ERR] --merge requires a folder argument.");
+					return 1;
+				}
+				mergeDir = args[++i];
 			}
 			if (args[i] == "--keep-d" && i + 1 < args.Length)
 			{
@@ -53,6 +65,22 @@ internal class Program
 				}
 				cutBottomFromFlag = true;
 			}
+		}
+		if (mergeDir != null)
+		{
+			// inputs are already keep-d/cut-bottom filtered by the seeder that
+			// wrote them; re-applying would double-cut. Flags override.
+			int mergeKeepD = keepDFromFlag ? keepD : int.MaxValue;
+			int mergeCutBottom = cutBottomFromFlag ? cutBottom : 0;
+			Console.WriteLine("[..] Mode: merge folder " + mergeDir);
+			if (dbFromFlag)
+			{
+				Console.WriteLine("[..] --db ignored in merge mode; output is " + Path.Combine(mergeDir, GhostDb.MergeFileName));
+			}
+			Console.WriteLine("[..] Output: " + Path.Combine(mergeDir, GhostDb.MergeFileName));
+			Console.WriteLine("[..] Keep window: " + (keepDFromFlag ? "last " + keepD + " versions (flag)" : "all versions in union (inputs pre-filtered)"));
+			Console.WriteLine("[..] Cut bottom: " + (cutBottomFromFlag ? cutBottom + "% (flag)" : "off (inputs pre-filtered)"));
+			return Merger.RunMerge(mergeDir, mergeKeepD, mergeCutBottom, Console.Out, Console.Error);
 		}
 		Console.WriteLine("[..] Keep window: last " + keepD + " versions" + (keepDFromFlag ? " (flag)" : " (default)"));
 		Console.WriteLine("[..] Cut bottom: " + cutBottom + "%" + (cutBottomFromFlag ? " (flag)" : " (default)"));
@@ -367,81 +395,13 @@ internal class Program
 			Console.WriteLine($"     {stat.Key}  kept {stat.Value[1],7:N0}  cut {stat.Value[0] - stat.Value[1],7:N0}  total {stat.Value[0],8:N0}");
 		}
 		Console.Write("[..] Writing " + text + " ...");
-		string tmpPath = text + ".tmp";
-		int n = list2.Count;
-		string[] versionCodes = list2.Select(e => e.D.Substring(0, 2)).Distinct().OrderBy(c => c, StringComparer.Ordinal).ToArray();
-		Dictionary<string, byte> versionIndex = new Dictionary<string, byte>(versionCodes.Length);
-		for (int i = 0; i < versionCodes.Length; i++)
+		int n = GhostDb.Write(list2, text, (done, total) =>
 		{
-			versionIndex[versionCodes[i]] = (byte)i;
-		}
-		byte[] dCodes = new byte[n];
-		for (int i = 0; i < n; i++)
-		{
-			dCodes[i] = versionIndex[list2[i].D.Substring(0, 2)];
-		}
-		int[] dOrder = Enumerable.Range(0, n).OrderBy(i => dCodes[i]).ThenBy(i => i).ToArray();
-		double[] rValues = list2.Select(e => e.R).OrderByDescending(r => r).ToArray();
-		long prefixSize = 12L + 1L + 2L * versionCodes.Length + 29L * n;
-		byte[][] compBlobs = new byte[n][];
-		long[] blobOffsets = new long[n];
-		using (MemoryStream blobMs = new MemoryStream())
-		{
-			for (int i = 0; i < n; i++)
+			if (done % 10000 == 0)
 			{
-				byte[] rawBytes = Encoding.UTF8.GetBytes(list2[i].Metadata);
-				using MemoryStream srcMs = new MemoryStream(rawBytes);
-				using MemoryStream dstMs = new MemoryStream(rawBytes.Length / 2 + 64);
-				using (GZipStream gzipStream = new GZipStream(dstMs, CompressionLevel.Optimal))
-				{
-					srcMs.CopyTo(gzipStream);
-				}
-				compBlobs[i] = dstMs.ToArray();
-				blobOffsets[i] = prefixSize + blobMs.Position;
-				blobMs.Write(BitConverter.GetBytes((uint)compBlobs[i].Length), 0, 4);
-				blobMs.Write(BitConverter.GetBytes((uint)rawBytes.Length), 0, 4);
-				blobMs.Write(compBlobs[i], 0, compBlobs[i].Length);
-				if ((i + 1) % 10000 == 0)
-				{
-					Console.Write($"\r[..] Writing {text} ... [compressing {i + 1:N0}/{n:N0}]   ");
-				}
+				Console.Write($"\r[..] Writing {text} ... [compressing {done:N0}/{total:N0}]   ");
 			}
-			using (FileStream fileStream = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None))
-			{
-				using BinaryWriter binaryWriter = new BinaryWriter(fileStream);
-				binaryWriter.Write("BGDB"u8);
-				binaryWriter.Write(1u);
-				binaryWriter.Write((uint)n);
-				binaryWriter.Write((byte)versionCodes.Length);
-				foreach (string versionCode in versionCodes)
-				{
-					binaryWriter.Write(Encoding.ASCII.GetBytes(versionCode));
-				}
-				foreach (Entry item5 in list2)
-				{
-					binaryWriter.Write(item5.SteamId);
-				}
-				foreach (long blobOffset in blobOffsets)
-				{
-					binaryWriter.Write((ulong)blobOffset);
-				}
-				foreach (byte dCode in dCodes)
-				{
-					binaryWriter.Write(dCode);
-				}
-				foreach (int runIndex in dOrder)
-				{
-					binaryWriter.Write((uint)runIndex);
-				}
-				foreach (double rValue in rValues)
-				{
-					binaryWriter.Write(rValue);
-				}
-				binaryWriter.Flush();
-				blobMs.WriteTo(fileStream);
-			}
-		}
-		File.Move(tmpPath, text, overwrite: true);
+		});
 		long length = new FileInfo(text).Length;
 		Console.WriteLine($"\r[OK]  {n:N0} rows -> {text} ({(double)length / 1048576.0:F1} MB).{new string(' ', 20)}");
 		Steam.SteamAPI_Shutdown();
