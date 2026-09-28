@@ -22,23 +22,6 @@ const FORMAT_VERSION = 1
 # LIMIT 200 on the probe query).
 const PROBE_SCAN_LIMIT = 200
 
-# Rank tier offsets for progression tuning (negative shifts = easier opponents)
-const ELO_TIER_BRONZE_SILVER = 0     # Ranks ~100k+
-const ELO_TIER_GOLD_PLATINUM = 1     # Ranks ~50k-100k
-const ELO_TIER_DIAMOND = 2           # Ranks ~15k-50k
-const ELO_TIER_MASTER = 3            # Ranks ~5k-15k
-const ELO_TIER_GRANDMASTER = 4       # Ranks ~1k-5k
-const ELO_TIER_GRANDMA = 5           # Ranks ~1-1k
-
-const TIER_OFFSETS = {
-	ELO_TIER_BRONZE_SILVER: 0.00,    # No shift - fair matches
-	ELO_TIER_GOLD_PLATINUM: 0.00,    # No shift - fair matches
-	ELO_TIER_DIAMOND: -0.10,         # Shift 10% toward lower ranks
-	ELO_TIER_MASTER: -0.15,          # Shift 15% toward lower ranks
-	ELO_TIER_GRANDMASTER: -0.20,     # Shift 20% toward lower ranks
-	ELO_TIER_GRANDMA: -0.25,         # Shift 25% toward lower ranks
-}
-
 var _db_path: String
 var _log
 var _parse_fn: FuncRef
@@ -155,7 +138,7 @@ func load_ghosts(state: Dictionary) -> Dictionary:
 	# the match. The no-rank middle-50% fallback window is never refilled.
 	if filter_fn != null and player_rank > 0:
 		var threshold = int(state["window"] / 2)
-		var bounds = _window_bounds(player_rank, out["db_rows"])
+		var bounds = _window_bounds(player_rank)
 		var seen = {}
 		for run in out["runs"]:
 			var rid = _run_key(run)
@@ -164,8 +147,8 @@ func load_ghosts(state: Dictionary) -> Dictionary:
 		var half = 1000
 		while out["runs"].size() < threshold and not (bounds["lo"] <= 1 and bounds["hi"] >= out["db_rows"]):
 			half *= 2
-			var lo = max(1, bounds["adjusted"] - half)
-			var hi = bounds["adjusted"] + half
+			var lo = max(1, player_rank - half)
+			var hi = player_rank + half
 			var rp_rows = _window_rows(lo, hi, state["player_id"], hi - lo + 1)
 			var rp = _parse_rows(rp_rows)
 			out["json_ok"] += rp["json_ok"]
@@ -349,33 +332,11 @@ func _read_blob(f, idx: int) -> String:
 	return raw.get_string_from_utf8()
 
 
-func _get_rank_tier(rank: int, total_rows: int) -> int:
-	if total_rows < 100:
-		return ELO_TIER_BRONZE_SILVER
-	var pct = 1.0 - (float(rank) / float(total_rows))
-	if pct < 0.33:
-		return ELO_TIER_BRONZE_SILVER
-	elif pct < 0.66:
-		return ELO_TIER_GOLD_PLATINUM
-	elif rank < 1000:
-		return ELO_TIER_GRANDMA
-	elif rank < 5000:
-		return ELO_TIER_GRANDMASTER
-	elif rank < 15000:
-		return ELO_TIER_MASTER
-	else:
-		return ELO_TIER_DIAMOND
-
-
 # Opponent-window arithmetic shared by _query_runs and the filter refill:
-# tier-adjusted center, 1000-rank half-window, lo clamped to 1.
-func _window_bounds(rank: int, total_rows: int) -> Dictionary:
-	var tier = _get_rank_tier(rank, total_rows)
-	var offset_pct = TIER_OFFSETS.get(tier, 0.0)
-	var adjusted_rank = max(1, int(rank + (rank * offset_pct)))
+# rank-centered 1000-rank half-window, lo clamped to 1.
+func _window_bounds(rank: int) -> Dictionary:
 	return {
-		"tier": tier, "offset": offset_pct, "adjusted": adjusted_rank,
-		"lo": max(1, adjusted_rank - 1000), "hi": adjusted_rank + 1000,
+		"lo": max(1, rank - 1000), "hi": rank + 1000,
 	}
 
 
@@ -422,9 +383,7 @@ func _blob_string(f, comp_len: int, raw_len: int) -> String:
 
 func _query_runs(rank: int, player_id: int, limit: int) -> Array:
 	if rank > 0:
-		var b = _window_bounds(rank, _n)
-		if b["offset"] != 0.0:
-			_log.info("rank_adjust tier=%d rank=%d->%d offset=%.0f%%" % [b["tier"], rank, b["adjusted"], b["offset"] * 100])
+		var b = _window_bounds(rank)
 		var rows = _window_rows(b["lo"], b["hi"], player_id, limit)
 		if not rows.empty():
 			return rows

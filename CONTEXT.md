@@ -50,10 +50,6 @@ _Avoid_: re-rank
 The rank range ghosts are sampled from, centered on the player.
 _Avoid_: rank window, bracket
 
-**Tier**:
-Player band mapped from the rank estimate; higher tiers shift the opponent window toward easier ghosts.
-_Avoid_: league, division
-
 **Min-d cutoff**:
 Oldest game version accepted as a ghost. The mod probes it live at startup and persists it.
 _Avoid_: min version, version floor
@@ -85,3 +81,21 @@ _Avoid_: blacklist, ban, ignore list
 **Refill**:
 Widening the opponent window around the player when exclusions leave too few ghosts. Stops as soon as the pool is half full again or the whole ghost DB is inside the window.
 _Avoid_: re-query, expansion
+
+## Matchmaking
+
+**Feasible run**:
+A ghost that has a board for the player's current day; the only candidates for a fight.
+_Avoid_: valid run, eligible ghost
+
+**Matchmaking score**:
+The game's per-fight cost assigned to every feasible run; the lowest-cost run fights the player. Favors equal wins, close ratings, fresh faces, class variety.
+_Avoid_: mmScore (in prose), weight
+
+**Softball round**:
+A fight where the game weakens the opponent for new or struggling players, by fielding the opponent's earlier build.
+_Avoid_: mercy round, easy round
+
+**Item handicap**:
+A fight where the game removes one opponent item before combat, granted to losing players below Diamond.
+_Avoid_: item drop, penalty

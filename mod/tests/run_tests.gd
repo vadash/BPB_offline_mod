@@ -32,7 +32,6 @@ func _initialize() -> void:
 	test_window()
 	test_zero_parse_fallback()
 	test_estimate_rank()
-	test_tier_offset()
 	test_filter_exclusions()
 	test_refill()
 	test_bitstream_port()
@@ -228,34 +227,7 @@ func test_estimate_rank() -> void:
 	eq(g.db.estimate_rank(3.0), 1, "top ghost -> rank 1")
 	eq(g.db.estimate_rank(9.9), 1, "above every ghost -> rank 1")
 
-# 6. Tier offset: the Grandma tier shifts the adjusted rank down 25%, moving
-# the opponent window's hi edge with it (100 -> 75, hi 1100 -> 1075). Dense
-# ranks 1076/1077 sit beyond the shifted edge.
-func test_tier_offset() -> void:
-	print("[TEST] tier offset (Grandma shifts window hi edge)")
-	var db_path = user_path("tier.db")
-	var rows = [FIXTURE.row(1, 100, '{"score":100,"me":1}', {"r": 100.0})]
-	for rank in range(1, 1078):
-		if rank == 100:
-			continue
-		rows.append(FIXTURE.row(1000 + rank, rank, '{"score":%d}' % rank))
-	FIXTURE.build(db_path, 1, rows)
-	var g = make_ghost(db_path, user_path("tier.log"))
-	var res = g.db.load_ghosts({
-		"player_r": 100.0, "estimated_rank": 100, "db_row_count": 1077,
-		"window": 2000, "player_id": 1,
-	})
-	eq(res.get("rank"), 100, "cached rank reused")
-	eq(res.get("db_rows"), 1077, "row count")
-	var scores = {}
-	for run in res.get("runs"):
-		scores[int(run["score"])] = true
-	ok(scores.has(1074), "rank 1074 inside shifted hi edge (75+1000=1075)")
-	ok(not scores.has(1076), "rank 1076 beyond shifted hi edge")
-	ok(not scores.has(100), "player excluded from own window")
-	eq(res.get("runs").size(), 1074, "every other ghost in the window")
-
-# 7. Ghost exclusions: an injected filter_fn labels runs to drop. GhostDb
+# 6. Ghost exclusions: an injected filter_fn labels runs to drop. GhostDb
 # only forwards runs to the filter — it never reads run fields itself.
 func test_filter_exclusions() -> void:
 	print("[TEST] filter exclusions (filter_fn drops labeled runs)")
@@ -281,7 +253,7 @@ func test_filter_exclusions() -> void:
 		"filter log line counts kept and filtered")
 	_fake_filter_kills = {}
 
-# 8. Refill: a filter that guts the rank-centered window doubles the
+# 7. Refill: a filter that guts the rank-centered window doubles the
 # half-window until it covers the whole DB, deduping runs already kept.
 func test_refill() -> void:
 	print("[TEST] refill (widened window recovers filter survivors)")

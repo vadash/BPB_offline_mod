@@ -43,7 +43,6 @@ Godot 3.6.2 mod that replaces Steam leaderboard I/O with a local ghost database 
 3. **Download path** — Opens `ghosts.gdb`, gates the BGDB v1 header (magic + format_version), estimates rank from cached state, reads a ±1000 opponent window, parses metadata, notifies the game.
 4. **Zero-parse fallback** — If the primary opponent window parses to zero ghosts, one refill over the global middle-50% window. Game rejects ghosts older than its cutoff.
 5. **Min version probe** — Walks rows oldest-`d` first through the game's parser; first parseable `d` = live cutoff. Persists `min_d` at startup for reference; the seeder no longer consumes it (it keeps the newest `--keep-d` version codes instead).
-6. **Tiered difficulty** — Player percentile maps to a tier; higher tiers shift the opponent window toward easier opponents.
 
 ### Key files
 
@@ -72,7 +71,7 @@ The game (`RunDatabase`) touches exactly: fields `gotResponse`, `largestSequence
 
 - `r` — Float Elo-like score from the game's metadata JSON. Ground truth of run performance.
 - `rank` — Integer position estimated by counting `r_values` strictly greater than the player's r (binary search over the descending array), plus 1. Recomputed when the DB changes (row count differs from cached value).
-- Rank determines opponent selection: a ±1000 opponent window centered on the player. Higher tiers (Diamond+) get negative offsets shifting opponents easier.
+- Rank determines opponent selection: a ±1000 opponent window centered on the player. Per-fight selection inside that pool is the game's own (`RunDatabase.sortOpponents`); see `docs/matchmaking.md`.
 
 ## Godot 3.x constraints
 
