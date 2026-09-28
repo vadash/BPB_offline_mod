@@ -59,9 +59,9 @@ struggles (only outside Lobbies/Switch mode):
   non-weapon item.
 - **Softball round** — for early runs or a run rating ≤ 80, on a
   round-parity schedule (most rounds of runs 1–3, every 4th round later):
-  the opponent's *items* come from `N − 1`. Below Diamond, mercy records
-  (0W3L, ≤1W4L) add a second reduction: items from `N − 2`. Health and
-  stamina always stay at day N.
+  the opponent's *items* come from `N − 1`. Below Diamond, losing-streak
+  records (0W3L, ≤1W4L) add a second reduction: items from `N − 2`. Health
+  and stamina always stay at day N.
 - Guard: reductions never go before round 1; if they would, items stay and
   the item handicap applies instead.
 
@@ -73,8 +73,12 @@ biases toward opponents the player is likely to lose to.
 The mod replaces the pool, not the choice. `parsedRuns` is filled from
 `ghosts.gdb`: dense ranks within ±1000 of the player's rank estimate
 (60000 in statistics mode), minus exclusions, refilled per `CONTEXT.md` if
-exclusions gut the window. The game then books fights exactly as above.
+exclusions empty the window. The game then books fights exactly as above.
 
-Known sharp edge: the window is centered on one cached `r` from the last
-uploaded run, while the game's ratings are per class. Switching classes
-anchors the window to the previous class's strength until the next upload.
+The window centers on the current class's **class anchor**: the last
+ranked `r` that class uploaded, kept per class in the sidecar. Switching
+classes re-centers the window on the new class's own rating at the next
+download — the pool always matches the class you are playing. A class
+never ranked anchors at the game's fresh-class rating (`0.0`, bottom of
+the distribution), and unranked runs never move an anchor (their
+`r = -1000` means "no rating").

@@ -34,6 +34,7 @@ func _initialize() -> void:
 	test_estimate_rank()
 	test_filter_exclusions()
 	test_refill()
+	test_class_anchor()
 	test_bitstream_port()
 	print("")
 	print("checks=%d failures=%d" % [checks, failures])
@@ -292,6 +293,38 @@ func test_refill() -> void:
 	ok(text.find("filter kept=49 filtered=51") != -1, "primary filter line counts the gutted window")
 	ok(text.find("refill half=2000 lo=1 hi=3250") != -1, "refill doubles half to cover the whole DB")
 	_fake_filter_kills = {}
+
+# 8. Per-class anchor: switching classes re-estimates the rank from that
+# class's r even when the DB is unchanged, so the window centers on the
+# current class's rating (db_changed flags the sidecar resave).
+func test_class_anchor() -> void:
+	print("[TEST] class anchor (switch re-centers window)")
+	var db_path = user_path("anchor.db")
+	var rows = []
+	for rank in range(1, 11):
+		rows.append(FIXTURE.row(1000 + rank, rank, '{"score":%d}' % rank, {"r": 11.0 - rank}))
+	FIXTURE.build(db_path, 1, rows)
+	var g = make_ghost(db_path, user_path("anchor.log"))
+	# Sidecar: class 0 uploaded at r=5.0 (rank 6), DB unchanged since.
+	var res = g.db.load_ghosts({
+		"player_r": 5.0, "estimated_rank": 6, "db_row_count": 10,
+		"anchor_class": 0, "current_class": 0,
+		"window": 2000, "player_id": 999999,
+	})
+	eq(res.get("db_changed"), false, "same class and rows reuse cached rank")
+	eq(res.get("rank"), 6, "rank 6 for r=5.0")
+	# Switch to class 1 (r=9.0): rank re-estimated to 2, resave flagged.
+	res = g.db.load_ghosts({
+		"player_r": 9.0, "estimated_rank": 6, "db_row_count": 10,
+		"anchor_class": 0, "current_class": 1,
+		"window": 2000, "player_id": 999999,
+	})
+	eq(res.get("db_changed"), true, "class switch flags sidecar resave")
+	eq(res.get("rank"), 2, "rank re-estimated from the new class r")
+	var scores = []
+	for run in res.get("runs"):
+		scores.append(int(run["score"]))
+	eq(scores, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "window centered on rank 2 covers all 10 rows")
 
 # --- BitStream port ----------------------------------------------------------
 

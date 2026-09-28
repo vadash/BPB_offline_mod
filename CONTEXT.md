@@ -84,12 +84,16 @@ _Avoid_: re-query, expansion
 
 ## Matchmaking
 
+**Class anchor**:
+The per-class rating a session's opponent window is centered on; each class anchors independently. Classes never ranked anchor at the game's fresh-class rating, and unranked runs never move an anchor.
+_Avoid_: cached r, player rating
+
 **Feasible run**:
 A ghost that has a board for the player's current day; the only candidates for a fight.
 _Avoid_: valid run, eligible ghost
 
 **Matchmaking score**:
-The game's per-fight cost assigned to every feasible run; the lowest-cost run fights the player. Favors equal wins, close ratings, fresh faces, class variety.
+The game's per-fight cost assigned to every feasible run; the lowest-cost run fights the player. Favors equal wins, close ratings, new opponents, class variety.
 _Avoid_: mmScore (in prose), weight
 
 **Softball round**:

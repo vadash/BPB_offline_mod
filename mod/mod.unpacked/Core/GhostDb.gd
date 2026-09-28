@@ -80,22 +80,30 @@ func load_ghosts(state: Dictionary) -> Dictionary:
 	_probe_min_d(out, state)
 
 	# Determine player rank for opponent window centering. Re-estimate iff
-	# the live row count differs from the cached one (DB was replaced).
+	# the live row count differs from the cached one (DB was replaced) or
+	# the anchor class changed: each class anchors its own r, so a class
+	# switch must recenter even on an unchanged DB.
 	var player_rank = -1
 	if state["player_id"] != -1:
 		var cached_r = state["player_r"]
 		var cached_rows = int(state["db_row_count"])
+		var anchor_class = int(state.get("anchor_class", -1))
+		var current_class = int(state.get("current_class", anchor_class))
 
 		out["db_rows"] = _n
 
 		if cached_r != null:
-			if out["db_rows"] != cached_rows:
-				# DB was replaced — recompute rank against new distribution.
-				_log.info("db_changed old_rows=%d new_rows=%d re-estimating rank from cached r=%s" % [cached_rows, out["db_rows"], str(cached_r)])
+			var rows_changed = out["db_rows"] != cached_rows
+			var class_changed = current_class != anchor_class
+			if rows_changed:
+				_log.info("db_changed old_rows=%d new_rows=%d re-estimating rank from r=%s" % [cached_rows, out["db_rows"], str(cached_r)])
+			elif class_changed:
+				_log.info("class_changed anchor=%d current=%d re-estimating rank from r=%s" % [anchor_class, current_class, str(cached_r)])
+			if rows_changed or class_changed:
 				out["db_changed"] = true
 				player_rank = _estimate_rank(float(cached_r))
 				if player_rank >= 0:
-					_log.info("db_changed rank=%d" % player_rank)
+					_log.info("re_estimate rank=%d" % player_rank)
 				else:
 					player_rank = int(state["estimated_rank"])
 					_log.warn("re_estimate_no_rows fallback cached_rank=%d" % player_rank)

@@ -40,7 +40,7 @@ Godot 3.6.2 mod that replaces Steam leaderboard I/O with a local ghost database 
 
 1. **Game loads mod.pck** — PCK files override `res://` paths, so `Core/SteamWorkshop.gd` replaces the game's original.
 2. **Startup** — Caches paths next to the game exe, opens `bbof.log`, defers the download path.
-3. **Download path** — Opens `ghosts.gdb`, gates the BGDB v1 header (magic + format_version), estimates rank from cached state, reads a ±1000 opponent window, parses metadata, notifies the game.
+3. **Download path** — Opens `ghosts.gdb`, gates the BGDB v1 header (magic + format_version), reads the current class's anchor from cached state and estimates rank from it, reads a ±1000 opponent window, parses metadata, notifies the game.
 4. **Zero-parse fallback** — If the primary opponent window parses to zero ghosts, one refill over the global middle-50% window. Game rejects ghosts older than its cutoff.
 5. **Min version probe** — Walks rows oldest-`d` first through the game's parser; first parseable `d` = live cutoff. Persists `min_d` at startup for reference; the seeder no longer consumes it (it keeps the newest `--keep-d` version codes instead).
 
@@ -58,19 +58,20 @@ Godot 3.6.2 mod that replaces Steam leaderboard I/O with a local ghost database 
 
 ### Game contract (settled, from decrypted game bytecode)
 
-The game (`RunDatabase`) touches exactly: fields `gotResponse`, `largestSequenceNumber`, `parsedRuns`; methods `pushScore(meta, seq)`, `downloadScores()`; plus the load-bearing `class_name SteamLeaderboard` binding. The mod calls into the game: `RunDatabase.onSteamRunsReceived`, `RunDatabase.statisticsMode`, `SteamHelper.STEAM_ID`, and (exclusions feature) `Game.getClassName`, plus safe data reads: `run.get("characterClass")` / `run.get("rounds")` / `run.get("entryVersion")` on parsed RunData objects and the ItemBook data lookups (`getNumItems`, `getNumSockets`, `getNumGems`, `getDescriptorFromIndex` + descriptor `getName`/`get`/`getP`) from BoardDecoder (ADR 0002). The score parser is injected into GhostDb as a FuncRef wrapping `RunDatabase.parseSingleScore(dict, true, false)` so the deep module never references game classes. The game's board-decode family (`RunData.deserializeItemsOfRound`/`deserializeRound`/`deserializeItems`, `isRoundValid`) MUST NOT be called by name from the mod: it crashes the process (ADR 0002); the mod decodes boards itself per `docs/board-format.md`.
+The game (`RunDatabase`) touches exactly: fields `gotResponse`, `largestSequenceNumber`, `parsedRuns`; methods `pushScore(meta, seq)`, `downloadScores()`; plus the load-bearing `class_name SteamLeaderboard` binding. The mod calls into the game: `RunDatabase.onSteamRunsReceived`, `RunDatabase.statisticsMode`, `SteamHelper.STEAM_ID`, `Game.curClass` (per-class anchor, read at download — safe: Game autoload initializes before RunDatabase), and (exclusions feature) `Game.getClassName`, plus safe data reads: `run.get("characterClass")` / `run.get("rounds")` / `run.get("entryVersion")` on parsed RunData objects and the ItemBook data lookups (`getNumItems`, `getNumSockets`, `getNumGems`, `getDescriptorFromIndex` + descriptor `getName`/`get`/`getP`) from BoardDecoder (ADR 0002). The score parser is injected into GhostDb as a FuncRef wrapping `RunDatabase.parseSingleScore(dict, true, false)` so the deep module never references game classes. The game's board-decode family (`RunData.deserializeItemsOfRound`/`deserializeRound`/`deserializeItems`, `isRoundValid`) MUST NOT be called by name from the mod: it crashes the process (ADR 0002); the mod decodes boards itself per `docs/board-format.md`.
 
 ### Data files (at runtime, next to game exe)
 
 - `ghosts.gdb` — Ghost database in BGDB v1 (docs/ghost-db-format.md), produced by the seeder: `BGDB` magic + format_version + run_count header, dense-rank arrays (steam_ids, blob_offsets, d_codes, d_order, r_values descending), gzip metadata blobs.
-- `player_state.json` — Player sidecar with `r`, `estimated_rank`, `db_row_count`, `sequence_number`, `d`, `steam_id`, `last_metadata`, `min_d`.
+- `player_state.json` — Player sidecar: `r_by_class` (map of class index → last ranked `r` per class), `anchor_class` + `estimated_rank` (the class the current window center was computed for), `db_row_count`, `sequence_number`, `steam_id`, `min_d`. Unranked runs (`r = -1000`) advance `sequence_number` but never touch `r_by_class`. Legacy scalar-`r` sidecars migrate on load: the stored run's own metadata yields the class.
 - `ghost_filter.json` — Optional user config, hand-edited, re-read at every download: `{"exclude_classes": ["Engineer"], "exclude_items": ["False Life", "Holy Armor"]}`. Names are exact wiki-style display names (matched against `Game.getClassName` and item descriptor names). Missing file = no filtering. OR semantics: a ghost is dropped when its class is listed or any of its boards contains a listed item (whole-run). If filtering leaves fewer than `window/2` ghosts, the opponent window widens (rank half-width doubling) until the pool refills or the whole DB is covered.
 - `bbof.log` — Structured log `[HH:MM:SS] LEVEL msg`, 5 MB rotation.
 
 ### Rank system
 
-- `r` — Float Elo-like score from the game's metadata JSON. Ground truth of run performance.
-- `rank` — Integer position estimated by counting `r_values` strictly greater than the player's r (binary search over the descending array), plus 1. Recomputed when the DB changes (row count differs from cached value).
+- `r` — Float Elo-like score from the game's metadata JSON. Ground truth of run performance; the game keeps one per class.
+- **Class anchor** — per class, the last *ranked* uploaded `r` (sidecar `r_by_class`). A class never ranked anchors at the game's fresh-class rating (`0.0`). The window centers on the current class's anchor.
+- `rank` — Integer position estimated by counting `r_values` strictly greater than the anchor r (binary search over the descending array), plus 1. Recomputed when the DB changes (row count differs from cached value) or the anchor class changes.
 - Rank determines opponent selection: a ±1000 opponent window centered on the player. Per-fight selection inside that pool is the game's own (`RunDatabase.sortOpponents`); see `docs/matchmaking.md`.
 
 ## Godot 3.x constraints

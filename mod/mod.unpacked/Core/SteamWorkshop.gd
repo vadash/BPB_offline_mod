@@ -6,13 +6,19 @@ class_name SteamLeaderboard
 # Thin adapter: keeps the game contract (class_name SteamLeaderboard, the
 # fields RunDatabase reads, pushScore/downloadScores) and delegates every
 # ghost-DB read to Core/GhostDb.gd. Upload path persists player state to
-# player_state.json (sidecar, not in DB); download path reads ghosts.gdb
-# placed next to the game executable (BGDB v1, written by the seeder).
+# player_state.json (sidecar, not in DB): per-class ranked ratings
+# (r_by_class), the anchored class + rank estimate, sequence number, min-d
+# cutoff. Download path reads ghosts.gdb placed next to the game executable
+# (BGDB v1, written by the seeder), centered on the current class's anchor.
 # ---------------------------------------------------------------------------
 
 const BbofLog = preload("res://Core/BbofLog.gd")
 const GhostDb = preload("res://Core/GhostDb.gd")
 const BoardDecoder = preload("res://Core/BoardDecoder.gd")
+
+# The game's RunDatabase.UNRANKED_RATING: metadata r value for non-ranked
+# runs. Means "no rating" — such uploads never move the class anchor.
+const UNRANKED_RATING = -1000
 
 # Fields read by RunDatabase — must remain present and correctly typed.
 var gotResponse: bool = false
@@ -89,13 +95,52 @@ func _load_state() -> void:
 	f.close()
 	if p.error == OK and typeof(p.result) == TYPE_DICTIONARY:
 		_player_state = p.result
-		_log.info("state_loaded rank=%s r=%s db_rows=%s seq=%s" % [
+		_migrate_state()
+		var map = _player_state.get("r_by_class", {})
+		_log.info("state_loaded rank=%s anchor=%s classes=%d db_rows=%s seq=%s" % [
 			_player_state.get("estimated_rank", "(none)"),
-			_player_state.get("r", "(none)"),
+			_player_state.get("anchor_class", "(none)"),
+			map.size(),
 			_player_state.get("db_row_count", "(none)"),
 			_player_state.get("sequence_number", "(none)")])
 	else:
 		_log.warn("state_malformed — starting fresh")
+
+
+# Legacy sidecars carried one scalar r (last uploaded run, any class) plus
+# write-only r/d/last_metadata. Seed the per-class map from the stored
+# run's own metadata so the first download keeps the old window center
+# instead of treating that class as unseen (anchor 0.0). One-way: after
+# this, the scalar keys are gone and _save_state writes the new schema.
+func _migrate_state() -> void:
+	if _player_state.has("r_by_class"):
+		_player_state.erase("r")
+		_player_state.erase("d")
+		_player_state.erase("last_metadata")
+		return
+	var legacy_r = _player_state.get("r", null)
+	var map = {}
+	if legacy_r != null:
+		var meta_text = str(_player_state.get("last_metadata", ""))
+		var cls = -1
+		if meta_text != "":
+			var parsed = JSON.parse(meta_text)
+			if parsed.error == OK and typeof(parsed.result) == TYPE_DICTIONARY:
+				# The game's parser requires the ugc field (steamFields =
+				# sharedFields + ["ugc", "p"]); GhostDb injects it for every
+				# ghost — the pushed metadata carries p but never ugc.
+				parsed.result["ugc"] = 1
+				var run = _parse_single(parsed.result)
+				if run != null:
+					cls = int(run.get("characterClass"))
+		if cls >= 0:
+			map[str(cls)] = float(legacy_r)
+		else:
+			_log.warn("state_migrate_no_class legacy r dropped")
+	_player_state["r_by_class"] = map
+	_player_state.erase("r")
+	_player_state.erase("d")
+	_player_state.erase("last_metadata")
 
 
 func _save_state() -> void:
@@ -190,10 +235,20 @@ func _load_from_db() -> void:
 	_load_state()
 	largestSequenceNumber = max(int(_player_state.get("sequence_number", 0)), largestSequenceNumber)
 
+	# The download fires at startup, after the game picked its class
+	# (Game autoload precedes RunDatabase, so curClass is set by the time
+	# this deferred call runs).
+	var cur_class = int(Game.curClass)
+
 	var state = {
-		"player_r": _player_state.get("r", null),
+		# Per-class anchor: the current class's own r; a class never uploaded
+		# anchors at the game's fresh-class rating (0.0 — bottom of the
+		# distribution, matching how the game leagues a fresh class).
+		"player_r": _player_state.get("r_by_class", {}).get(str(cur_class), 0.0),
 		"estimated_rank": int(_player_state.get("estimated_rank", -1)),
 		"db_row_count": int(_player_state.get("db_row_count", 0)),
+		"anchor_class": int(_player_state.get("anchor_class", -1)),
+		"current_class": cur_class,
 		# Game dependency stays in the adapter: the opponent window size
 		# comes from the game's own mode.
 		"window": 60000 if RunDatabase.statisticsMode else 2001,
@@ -210,12 +265,14 @@ func _load_from_db() -> void:
 		return
 
 	# Sidecar updates the DB read produced: the probed min-d cutoff, and the
-	# re-estimated rank with fresh row count when the DB was replaced.
+	# re-estimated rank with fresh row count when the DB was replaced or the
+	# anchor class changed.
 	if res.min_d != "":
 		_player_state["min_d"] = res.min_d
 	if res.db_changed and res.rank >= 0:
 		_player_state["estimated_rank"] = res.rank
 		_player_state["db_row_count"] = res.db_rows
+		_player_state["anchor_class"] = cur_class
 	if res.min_d != "" or (res.db_changed and res.rank >= 0):
 		_save_state()
 
@@ -237,15 +294,13 @@ func pushScore(_steamMetaDataString: String, _sequenceNumber: int) -> void:
 	_log.info("push seq=%d meta_len=%d steam_id=%s preview='%s'" % [_sequenceNumber, meta_len, str(SteamHelper.STEAM_ID), meta_preview])
 
 	var player_r = null
-	var player_d = ""
 	var parsed = JSON.parse(_steamMetaDataString)
 	if parsed.error == OK and typeof(parsed.result) == TYPE_DICTIONARY:
 		player_r = parsed.result.get("r", null)
-		player_d = str(parsed.result.get("d", ""))
 		if player_r == null:
 			_log.warn("push no_r_field keys=%s" % str(parsed.result.keys()))
 		else:
-			_log.info("push meta_ok r=%s d=%s" % [str(player_r), player_d])
+			_log.info("push meta_ok r=%s" % str(player_r))
 	else:
 		_log.warn("push meta_parse_fail error=%d type=%d" % [parsed.error, typeof(parsed.result)])
 
@@ -255,28 +310,43 @@ func pushScore(_steamMetaDataString: String, _sequenceNumber: int) -> void:
 	if player_r != null:
 		db_rows = _ghost.row_count()
 		if db_rows < 0:
-			_log.warn("push db_open_fail state not written")
+			_log.warn("push db_open_fail anchor not written")
 		else:
-			estimated_rank = _ghost.estimate_rank(player_r)
-			if estimated_rank < 0:
-				_log.warn("push rank_estimate_no_rows db may be empty")
-			_log.info("push db_ok rows=%d rank=%d" % [db_rows, estimated_rank])
-
-			if SteamHelper.STEAM_ID != 0:
-				_player_state["steam_id"] = SteamHelper.STEAM_ID
-				_player_state["estimated_rank"] = estimated_rank
-				_player_state["sequence_number"] = _sequenceNumber
-				_player_state["r"] = player_r
-				_player_state["d"] = player_d
-				_player_state["db_row_count"] = db_rows
-				_player_state["last_metadata"] = _steamMetaDataString
-				_save_state()
+			# The uploaded run's class comes from its own metadata, through
+			# the game's safe parser — never game decode calls.
+			var cls = -1
+			var run = _parse_single(parsed.result)
+			if run != null:
+				cls = int(run.get("characterClass"))
+			if player_r == UNRANKED_RATING:
+				_log.info("push unranked anchor untouched class=%d" % cls)
+			elif cls < 0:
+				_log.warn("push no_class anchor not written")
 			else:
-				_log.warn("push no_steam_id seq=%d state not written" % _sequenceNumber)
+				# Ranked upload: this class's anchor moves to the run's r.
+				var map = _player_state.get("r_by_class", {})
+				map[str(cls)] = float(player_r)
+				_player_state["r_by_class"] = map
+				estimated_rank = _ghost.estimate_rank(player_r)
+				if estimated_rank < 0:
+					_log.warn("push rank_estimate_no_rows rank anchor kept")
+				else:
+					_player_state["estimated_rank"] = estimated_rank
+					_player_state["anchor_class"] = cls
+				_log.info("push db_ok rows=%d rank=%s class=%d" % [db_rows, str(estimated_rank), cls])
 	else:
 		_log.info("push skip_db player_r is null")
 
 	largestSequenceNumber = max(_sequenceNumber, largestSequenceNumber)
+	if SteamHelper.STEAM_ID != 0:
+		# Sequence tracking is mode-independent: unranked runs advance it
+		# even though they never move the anchor.
+		_player_state["steam_id"] = SteamHelper.STEAM_ID
+		_player_state["sequence_number"] = _sequenceNumber
+		_player_state["db_row_count"] = db_rows if db_rows >= 0 else int(_player_state.get("db_row_count", 0))
+		_save_state()
+	else:
+		_log.warn("push no_steam_id seq=%d state not written" % _sequenceNumber)
 	call_deferred("onSteamLeaderboardUploaded", 1, 0, {})
 
 
