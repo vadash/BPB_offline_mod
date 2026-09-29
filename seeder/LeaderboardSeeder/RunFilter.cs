@@ -12,7 +12,13 @@ internal static class RunFilter
 	internal sealed record FilterSettings(int KeepD, int CutBottom)
 	{
 		internal static readonly FilterSettings Seed = new(4, 50);
-		internal static readonly FilterSettings Merge = new(int.MaxValue, 0);
+
+		// Merge re-applies only the version window (same keep-d as a seed
+		// run, walk-back from the union's newest code). The rating floor
+		// never re-applies: inputs are already pre-cut.
+		internal static FilterSettings Merge => ForMerge(Seed.KeepD);
+
+		internal static FilterSettings ForMerge(int keepD) => new(keepD, 0);
 	}
 
 	internal sealed record CodeStat(string Code, int Total, int Kept);

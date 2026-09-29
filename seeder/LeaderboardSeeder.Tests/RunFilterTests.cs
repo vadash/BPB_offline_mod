@@ -140,19 +140,24 @@ public class ApplyTests
 	}
 
 	[Fact]
-	public void Apply_merge_settings_keep_everything()
+	public void Apply_merge_settings_keep_last_4_versions()
 	{
+		// Merge defaults to the seeder's keep-d (4): distinct codes {OA..OE}
+		// keep OB..OE and cut the OA row. The rating floor never fires at
+		// merge; inputs are pre-cut.
 		var rows = new List<Entry>
 		{
 			Row(1, 10.0, "OAa"),
-			Row(2, 20.0, "ODb"),
+			Row(2, 20.0, "OBb"),
 			Row(3, 30.0, "OCc"),
+			Row(4, 40.0, "ODd"),
+			Row(5, 50.0, "OEe"),
 		};
 
 		RunFilter.FilterResult result = RunFilter.Apply(rows, RunFilter.Dedup.None, RunFilter.FilterSettings.Merge);
 
-		Assert.Equal(3, result.Kept.Count);
-		Assert.Equal(0, result.WindowCut);
+		Assert.Equal(new ulong[] { 2, 3, 4, 5 }, result.Kept.Select(e => e.SteamId));
+		Assert.Equal(1, result.WindowCut);
 		Assert.Equal(0, result.FloorCut);
 		Assert.Equal(double.NegativeInfinity, result.Floor);
 	}

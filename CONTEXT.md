@@ -67,8 +67,12 @@ Bottom fraction of runs by `r` excluded from the ghost DB. Seeder-side percentil
 _Avoid_: rank cut, trim, percentile filter
 
 **Run filter**:
-The shared pipeline both seeder paths run rows through: admission, dedup, version window, rating floor. Lives in the seeder; the merger runs it over the union of its input ghost DBs.
+The shared pipeline both seeder paths run rows through: admission, dedup, version window, rating floor. Lives in the seeder; the merger runs dedup and the version window over the union of its input ghost DBs and never re-applies the rating floor, because its inputs are pre-cut.
 _Avoid_: pruning, filtering step
+
+**Version window**:
+The newest `keep-d` distinct version codes in the data, anchored at the newest code; runs with older codes are cut. Gaps in the code sequence are skipped, not counted. Same rule in seeder and merger.
+_Avoid_: keep window, version range, last X versions
 
 **Version code**:
 First two characters of a run's `d` string (`OC`, `OD`, …). The unit both tools use to order and filter versions; the rest of `d` is opaque packed bytes.

@@ -5,8 +5,9 @@ using System.Linq;
 
 namespace LeaderboardSeeder;
 
-// Deduplicates rows read from several ghost DBs and applies the seeder's
-// filters (RunFilter) over the union. Output row order is rating order
+// Deduplicates rows read from several ghost DBs and re-applies the version
+// window (RunFilter) over the union; the rating floor never re-applies
+// because its inputs are pre-cut. Output row order is rating order
 // (r descending, steam id ascending on ties), which becomes the merged DB's
 // dense-rank order.
 internal static class Merger
@@ -16,10 +17,9 @@ internal static class Merger
 	public sealed record MergeResult(
 		IReadOnlyList<Entry> Kept,
 		IReadOnlyList<InputReport> Inputs,
-		int WindowCut,
-		int FloorCut);
+		int WindowCut);
 
-	public static MergeResult Merge(IList<(string Name, IReadOnlyList<Entry> Rows, int Rejected)> inputs, int keepD, int cutBottom)
+	public static MergeResult Merge(IList<(string Name, IReadOnlyList<Entry> Rows, int Rejected)> inputs, int keepD)
 	{
 		List<Entry> union = new List<Entry>();
 		List<string> tags = new List<string>();
@@ -29,7 +29,7 @@ internal static class Merger
 			tags.AddRange(Enumerable.Repeat(name, rows.Count));
 		}
 		RunFilter.FilterResult filtered = RunFilter.Apply(union, RunFilter.Dedup.SteamIdAndContent,
-			new RunFilter.FilterSettings(keepD, cutBottom), tags);
+			RunFilter.FilterSettings.ForMerge(keepD), tags);
 		Dictionary<string, int> duplicates = filtered.InputDups.ToDictionary(d => d.Input, d => d.Duplicates);
 		List<InputReport> reports = new List<InputReport>(inputs.Count);
 		foreach ((string name, IReadOnlyList<Entry> rows, int rejected) in inputs)
@@ -44,13 +44,14 @@ internal static class Merger
 			return byRating != 0 ? byRating : a.SteamId.CompareTo(b.SteamId);
 		});
 
-		return new MergeResult(kept, reports, filtered.WindowCut, filtered.FloorCut);
+		return new MergeResult(kept, reports, filtered.WindowCut);
 	}
 
-	// Folder orchestration: scan top-level *.gdb (skipping the merged output
-	// itself), fail the whole merge on any unreadable input, write
+	// Folder orchestration: scan top-level *.gdb (a previous merged output
+	// is a valid input; content dedup keeps repeat merges idempotent), fail
+	// the whole merge on any unreadable input, write
 	// <folder>/ghosts-merged.gdb atomically. Returns a process exit code.
-	public static int RunMerge(string folder, int keepD, int cutBottom, TextWriter log, TextWriter err)
+	public static int RunMerge(string folder, int keepD, TextWriter log, TextWriter err)
 	{
 		if (!Directory.Exists(folder))
 		{
@@ -62,7 +63,6 @@ internal static class Merger
 		try
 		{
 			candidates = Directory.EnumerateFiles(folder, "*.gdb", SearchOption.TopDirectoryOnly)
-				.Where(f => !string.Equals(Path.GetFileName(f), GhostDb.MergeFileName, StringComparison.OrdinalIgnoreCase))
 				.OrderBy(f => Path.GetFileName(f), StringComparer.Ordinal)
 				.ToList();
 		}
@@ -105,12 +105,12 @@ internal static class Merger
 		int totalRejected;
 		try
 		{
-			result = Merge(inputs, keepD, cutBottom);
-			unionCount = result.Kept.Count + result.WindowCut + result.FloorCut;
+			result = Merge(inputs, keepD);
+			unionCount = result.Kept.Count + result.WindowCut;
 			totalDuplicates = result.Inputs.Sum(i => i.Duplicates);
 			totalRejected = result.Inputs.Sum(i => i.Rejected);
 			log.WriteLine($"[..] {unionCount:N0} unique rows across {inputs.Count} inputs, {totalDuplicates} duplicates, {totalRejected} rejected.");
-			log.WriteLine($"[..] Version window cut {result.WindowCut:N0}, rating floor cut {result.FloorCut:N0}.");
+			log.WriteLine($"[..] Version window cut {result.WindowCut:N0}.");
 
 			log.Write("[..] Writing " + outputPath + " ...");
 			GhostDb.Write(result.Kept, outputPath, (done, total) =>

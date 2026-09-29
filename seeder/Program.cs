@@ -67,19 +67,21 @@ internal class Program
 		}
 		if (mergeDir != null)
 		{
-			// inputs are already keep-d/cut-bottom filtered by the seeder that
-			// wrote them; re-applying would double-cut. Flags override.
-			int mergeKeepD = keepDFromFlag ? keepD : int.MaxValue;
-			int mergeCutBottom = cutBottomFromFlag ? cutBottom : 0;
+			// The merge output keeps the seeder's version window: walk back
+			// from the union's newest version code to keep-d codes. The
+			// rating floor never re-applies; inputs are already pre-cut.
 			Console.WriteLine("[..] Mode: merge folder " + mergeDir);
 			if (dbFromFlag)
 			{
 				Console.WriteLine("[..] --db ignored in merge mode; output is " + Path.Combine(mergeDir, GhostDb.MergeFileName));
 			}
 			Console.WriteLine("[..] Output: " + Path.Combine(mergeDir, GhostDb.MergeFileName));
-			Console.WriteLine("[..] Keep window: " + (keepDFromFlag ? "last " + keepD + " versions (flag)" : "all versions in union (inputs pre-filtered)"));
-			Console.WriteLine("[..] Cut bottom: " + (cutBottomFromFlag ? cutBottom + "% (flag)" : "off (inputs pre-filtered)"));
-			return Merger.RunMerge(mergeDir, mergeKeepD, mergeCutBottom, Console.Out, Console.Error);
+			Console.WriteLine("[..] Keep window: last " + keepD + " versions" + (keepDFromFlag ? " (flag)" : " (default)"));
+			if (cutBottomFromFlag)
+			{
+				Console.WriteLine("[..] --cut-bottom ignored in merge mode; inputs are already pre-cut.");
+			}
+			return Merger.RunMerge(mergeDir, keepD, Console.Out, Console.Error);
 		}
 		Console.WriteLine("[..] Keep window: last " + keepD + " versions" + (keepDFromFlag ? " (flag)" : " (default)"));
 		Console.WriteLine("[..] Cut bottom: " + cutBottom + "%" + (cutBottomFromFlag ? " (flag)" : " (default)"));
