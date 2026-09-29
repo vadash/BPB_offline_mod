@@ -10,7 +10,7 @@ One custom single-file format, `ghosts.gdb` (see `docs/ghost-db-format.md`): lit
 
 ## Consequences
 
-File drops to roughly a third (~170 MB) and the rank estimate becomes ~18 comparisons instead of a full-file scan. Both tools now own the byte layout; any change bumps `format_version` in the header and lands in both at once (clean cutover, no dual-format period). Compression is gzip on both ends from their standard libraries, so neither side gains a dependency.
+File drops to roughly a third (~170 MB) and the rank estimate becomes ~18 comparisons instead of a full-file scan. Both tools now own the byte layout; any change bumps `format_version` in the header and lands in both at once (clean cutover, no dual-format period). Compression is gzip on both ends from their standard libraries, so neither side gains a dependency. Cross-language conformance is enforced by the committed golden file (`LeaderboardSeeder.Tests/Fixtures/ghosts-fixture-64.gdb`), read by both the C# and GDScript suites.
 
 Later addition (2026-09): the Merger (`seeder --merge <folder>`) is a second writer of the format. It shares the seeder's writer code (`LeaderboardSeeder/GhostDb.Write`), so the layout stays single-sourced and version bumps still land in every writer at once.
 

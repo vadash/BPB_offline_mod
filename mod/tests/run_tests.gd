@@ -35,6 +35,7 @@ func _initialize() -> void:
 	test_filter_exclusions()
 	test_refill()
 	test_class_anchor()
+	test_golden_db()
 	test_bitstream_port()
 	print("")
 	print("checks=%d failures=%d" % [checks, failures])
@@ -67,14 +68,18 @@ func _core_script(name: String):
 func user_path(name: String) -> String:
 	return OS.get_user_data_dir().plus_file(name)
 
-func make_ghost(db_path: String, log_path: String) -> Dictionary:
+func make_ghost(db_path: String, log_path: String, parse_fn = null) -> Dictionary:
 	var dir = Directory.new()
 	if dir.file_exists(log_path):
 		dir.remove(log_path)
 	var blog = BbofLogScript.new()
 	blog.open(log_path)
 	var gdb = GhostDbScript.new()
-	gdb.setup(db_path, blog, funcref(self, "fake_parse"))
+	# GDScript default args must be constants, so the standard double is
+	# injected here instead of in the signature.
+	if parse_fn == null:
+		parse_fn = funcref(self, "fake_parse")
+	gdb.setup(db_path, blog, parse_fn)
 	return {"db": gdb, "log": blog, "log_path": log_path}
 
 # Test double for the game's RunDatabase.parseSingleScore: a dict counts as a
@@ -325,6 +330,58 @@ func test_class_anchor() -> void:
 	for run in res.get("runs"):
 		scores.append(int(run["score"]))
 	eq(scores, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "window centered on rank 2 covers all 10 rows")
+
+# 9. Golden file: the committed seeder-written fixture read through the same
+# public seam the game uses, so the GDScript and C# suites enforce the same
+# bytes (docs/ghost-db-format.md). Pinned values come from the committed
+# file; the fixture is generated from a real dump, never hand-made.
+func test_golden_db() -> void:
+	print("[TEST] golden fixture (committed seeder DB, cross-language seam)")
+	var golden_path = ProjectSettings.globalize_path("res://").plus_file("../../seeder/LeaderboardSeeder.Tests/Fixtures/ghosts-fixture-64.gdb")
+	if not File.new().file_exists(golden_path):
+		# The file is committed; absence is a broken checkout, never a skip.
+		ok(false, "golden fixture missing: " + golden_path)
+		return
+	var g = make_ghost(golden_path, user_path("golden.log"), funcref(self, "golden_parse"))
+	eq(g.db.row_count(), 64, "committed row count is 64")
+	eq(g.db.estimate_rank(415.196835), 1, "top r estimates rank 1")
+	eq(g.db.estimate_rank(60.118407), 64, "bottom r estimates rank 64")
+	eq(g.db.estimate_rank(270.231926), 32, "mid r estimates rank 32")
+	# Dense order is leaderboard order, not r order: dense rank 2's r
+	# estimates to 34, so the two ranks must never be conflated.
+	eq(g.db.estimate_rank(266.646171), 34, "dense rank 2 estimates r-rank 34")
+	# Player id 1 is not in the DB (real ids are 17 digits), so no row is
+	# excluded and the cached rank is reused.
+	var res = g.db.load_ghosts({
+		"player_r": 270.231926, "estimated_rank": 32, "db_row_count": 64,
+		"player_id": 1, "window": 4,
+	})
+	eq(res.get("ok"), true, "schema gate passes on seeder bytes")
+	eq(res.get("rank"), 32, "cached rank reused on unchanged DB")
+	var rs = []
+	for run in res.get("runs"):
+		rs.append(float(run["r"]))
+	eq(rs, [342.884159, 266.646171, 270.231926, 273.436809],
+		"window returns the first 4 dense rows in order")
+	eq(res.get("json_ok"), 4, "every window blob parses as JSON")
+	# The own-steam_id exclusion consumes the file's u64 section: dense
+	# rank 3 drops out and the window refills from rank 5.
+	res = g.db.load_ghosts({
+		"player_r": 270.231926, "estimated_rank": 32, "db_row_count": 64,
+		"player_id": 76561199652789041, "window": 4,
+	})
+	rs = []
+	for run in res.get("runs"):
+		rs.append(float(run["r"]))
+	eq(rs, [342.884159, 266.646171, 273.436809, 361.948541],
+		"own steam_id (dense rank 3) excluded from the window")
+
+# Real seeder metadata parses as a ghost iff it carries the r field, like
+# the seeder's own write-side gate.
+func golden_parse(dict):
+	if dict.has("r"):
+		return dict
+	return null
 
 # --- BitStream port ----------------------------------------------------------
 

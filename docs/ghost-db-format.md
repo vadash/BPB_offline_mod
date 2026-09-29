@@ -30,3 +30,7 @@ The metadata string is stored verbatim as UTF-8 (the exact text the seeder recei
 - **Opponent window** `[lo, hi]`, self id, limit: read blobs `lo-1 .. hi-1` in order, skip runs whose `raw_len <= 10` or whose `steam_id` equals the player's, stop after `limit` accepted rows.
 - **Min-d probe**: walk `d_order`, decompress + JSON-parse each blob, first parseable one marks the cutoff (version code = first 2 chars of its `d`); stop after 200 scanned.
 - **Row count**: `run_count` from the header; no scan.
+
+## Reference artifact
+
+`seeder/LeaderboardSeeder.Tests/Fixtures/ghosts-fixture-64.gdb` is the committed reference file, written by `GhostDb.Write` from the first 64 rows of a real dump; both test suites read it (C# `FixtureTests`, the mod's `run_tests.gd` golden suite). Regenerate only where the real dump exists (the author's machine): set `BPB_REGENERATE_FIXTURE=1` and run the xunit test `Regenerate_fixture_from_real_dump`.

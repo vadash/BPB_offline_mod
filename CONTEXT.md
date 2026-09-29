@@ -24,6 +24,10 @@ _Avoid_: opponent run, dummy
 The local store the seeder produces and the mod reads; the source of ghosts when Steam is absent.
 _Avoid_: dump, cache
 
+**Golden DB**:
+Committed seeder-written ghost DB both test suites read; the format's conformance artifact.
+_Avoid_: test dump, fixture database
+
 **Seeder**:
 CLI tool that scrapes the Steam leaderboard and writes the ghost DB.
 _Avoid_: scraper, dumper
