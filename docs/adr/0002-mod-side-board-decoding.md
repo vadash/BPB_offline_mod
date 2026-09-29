@@ -29,7 +29,7 @@ Consequences: every game update can shift item indexes or the format; the
 format constants (999 health/stamina range, 10x10 inventory cells) and the
 Magic Ring name/persistence assumption are the first suspects when decode
 validation fails after an update. Validate by decoding a DB sample offline
-(Python port against the ItemBook table dump) or in game via bbof.log.
+(Python port against the ItemBook data dump) or in game via bbof.log.
 
 Considered options:
 
@@ -38,3 +38,12 @@ Considered options:
   feature the mod promises.
 - Seeder-side decoding: rejected - same decoder needed in C#, doubles the
   port surface; mod-side decoding keeps the DB schema at version 1.
+
+Amendment (item-data seam): `decode_item_names` takes the item facts as a
+parameter instead of reading the `ItemBook` global - production passes the
+global at the SteamWorkshop call site. Headless decode tests run against
+the committed `mod/tests/fixtures/item_book_dump.json`; the dump is
+auto-written next to the exe on every game start and doubles as the exact
+item-name reference for authoring `ghost_filter.json`. Decode *parity*
+with the game is still only provable in game (bbof.log) - the dump proves
+the tests exercise the real names, socket counts, and effects.

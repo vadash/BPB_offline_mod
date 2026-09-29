@@ -90,6 +90,10 @@ _Avoid_: non-Steam copy
 A user rule that stops ghosts from loading. A ghost is dropped when its hero class matches an excluded class, or any of its boards contains an excluded item. Rules combine with OR.
 _Avoid_: blacklist, ban, ignore list
 
+**Item data**:
+The per-item facts the board decoder reads: item and gem counts, display names, socket counts, ring effects. Read live from the game's ItemBook in production; headless tests read the committed `item_book_dump.json` copy.
+_Avoid_: item table, item book dump
+
 **Refill**:
 Widening the opponent window around the player when exclusions leave too few ghosts. Stops as soon as the pool is half full again or the whole ghost DB is inside the window.
 _Avoid_: re-query, expansion

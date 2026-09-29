@@ -11,6 +11,15 @@ const FIXTURE = preload("res://fixture.gd")
 var GhostDbScript
 var BbofLogScript
 var BitStreamScript
+var BoardDecoderScript
+var SteamWorkshopScript
+var BitWriterScript
+var DumpItemDataScript
+
+# Committed ItemBook dump (mod/tests/fixtures) backing the item-data double.
+var _dump: Dictionary = {}
+var _decoder
+var _items
 
 var checks: int = 0
 var failures: int = 0
@@ -22,7 +31,25 @@ func _initialize() -> void:
 	GhostDbScript = _core_script("GhostDb.gd")
 	BbofLogScript = _core_script("BbofLog.gd")
 	BitStreamScript = _core_script("BitStream.gd")
-	if GhostDbScript == null or BbofLogScript == null or BitStreamScript == null:
+	# BoardDecoder and SteamWorkshop preload res://Core/*.gd at compile time;
+	# copy the Core scripts into this project first (check_scene.gd's trick)
+	# so those preloads resolve. Fresh copy every run - the mod.unpacked
+	# originals stay the source of truth. BoardDecoder loads from the mod
+	# tree (no class_name); SteamWorkshop must load from the copy because its
+	# class_name SteamLeaderboard is registered against res://Core/ here.
+	if _copy_core_scripts():
+		BoardDecoderScript = _core_script("BoardDecoder.gd")
+		SteamWorkshopScript = load("res://Core/SteamWorkshop.gd")
+	BitWriterScript = load("res://bit_writer.gd")
+	DumpItemDataScript = load("res://dump_item_data.gd")
+	_dump = _load_dump()
+	if _dump.size() > 0:
+		_decoder = BoardDecoderScript.new()
+		_items = DumpItemDataScript.new(_dump)
+	if GhostDbScript == null or BbofLogScript == null or BitStreamScript == null \
+			or BoardDecoderScript == null or SteamWorkshopScript == null \
+			or BitWriterScript == null or DumpItemDataScript == null \
+			or _dump.empty() or _decoder == null or _items == null:
 		print("")
 		print("checks=%d failures=%d" % [checks, failures])
 		quit(1)
@@ -36,7 +63,10 @@ func _initialize() -> void:
 	test_refill()
 	test_class_anchor()
 	test_golden_db()
+	test_decode_item_names()
+	test_decode_golden_smoke()
 	test_bitstream_port()
+	test_filter_unknown_item_warn()
 	print("")
 	print("checks=%d failures=%d" % [checks, failures])
 	quit(1 if failures > 0 else 0)
@@ -67,6 +97,40 @@ func _core_script(name: String):
 
 func user_path(name: String) -> String:
 	return OS.get_user_data_dir().plus_file(name)
+
+# Copies the Core scripts into res://Core/ so the compile-time preloads in
+# BoardDecoder (BitStream) and SteamWorkshop (BbofLog, GhostDb,
+# BoardDecoder) resolve inside this test project. Fresh copy every run - the
+# mod.unpacked originals stay the source of truth.
+func _copy_core_scripts() -> bool:
+	var src_dir = ProjectSettings.globalize_path("res://").plus_file("../mod.unpacked/Core/")
+	var dst_dir = ProjectSettings.globalize_path("res://").plus_file("Core/")
+	var dir = Directory.new()
+	if dir.make_dir_recursive(dst_dir) != OK:
+		return false
+	for name in ["BbofLog.gd", "GhostDb.gd", "BitStream.gd", "BoardDecoder.gd", "SteamWorkshop.gd"]:
+		var dst = dst_dir.plus_file(name)
+		if dir.file_exists(dst):
+			dir.remove(dst)
+		if dir.copy(src_dir.plus_file(name), dst) != OK:
+			return false
+	return true
+
+# The committed dump of the ItemBook facts the decoder reads (auto-written
+# next to the game exe every start, ADR 0002).
+func _load_dump() -> Dictionary:
+	var f = File.new()
+	if f.open("res://fixtures/item_book_dump.json", File.READ) != OK:
+		failures += 1
+		print("  FAIL  fixtures/item_book_dump.json missing")
+		return {}
+	var parsed = parse_json(f.get_as_text())
+	f.close()
+	if typeof(parsed) != TYPE_DICTIONARY or not parsed.has("items"):
+		failures += 1
+		print("  FAIL  fixtures/item_book_dump.json malformed")
+		return {}
+	return parsed
 
 func make_ghost(db_path: String, log_path: String, parse_fn = null) -> Dictionary:
 	var dir = Directory.new()
@@ -383,11 +447,184 @@ func golden_parse(dict):
 		return dict
 	return null
 
+# --- Board decode (item-data seam) -------------------------------------------
+
+# Encodes a synthetic round exactly the way the game writes boards
+# (docs/board-format.md), so the decode tests pin every format constant at
+# the public seam: health/stamina range 999, item index width (num_items now,
+# 510 legacy), 10x10 inventory cells, the 2-bit per-item field, gem range
+# binary_ceil(num_gems + 1) = 64 with empty socket 63, and Magic Ring's
+# 12-bit persistence blob (effects 2.0 * 6). specs: [index, x, y, field,
+# gems] with gems an Array of gem indexes (empty = hasGems 0).
+func encode_round(specs: Array, num_items: int) -> String:
+	var w = BitWriterScript.new()
+	w.push(123, 999)
+	w.push(456, 999)
+	for spec in specs:
+		var index = int(spec[0])
+		w.push(index, num_items)
+		w.push(int(spec[1]), 10)
+		w.push(int(spec[2]), 10)
+		w.push(int(spec[3]), 4)
+		var gems: Array = spec[4]
+		if index >= 0 and index < _dump["items"].size():
+			if _items.getNumSockets(index) > 0:
+				if gems.size() > 0:
+					w.push(1, 2)
+					for gem in gems:
+						w.push(int(gem), 64)
+				else:
+					w.push(0, 2)
+			if _items.getDescriptorFromIndex(index).getName() == "Magic Ring":
+				w.push_bitsize((1 << 12) - 1, 12)
+	# Real boards end with the 6-bit char padding only (< 8 trailing bits,
+	# so the reader's item loop stops); pad the same way.
+	while w.bits.size() % 6 != 0:
+		w.push_bitsize(0, 1)
+	return w.to_godot_string()
+
+# decode_item_names is headless-testable since the item facts became a
+# parameter (ADR 0002 amendment): production passes the ItemBook global at
+# the SteamWorkshop call site, tests pass the dump-backed double fed by the
+# committed item_book_dump.json. Pinned dump facts: num_items 519,
+# num_gems 34, Wooden Sword index 1 sockets 1, Book of Ice New index 331
+# without a scene, Magic Ring index 505 effects 2.0, Superior Ring index
+# 506 effects 3.0.
+func test_decode_item_names() -> void:
+	print("[TEST] board decode (item-data seam, dump-backed)")
+	var dec = BoardDecoderScript.new()
+	var modern = _items.getNumItems()
+
+	# Happy paths: full round trip through the synthetic encoder.
+	eq(dec.decode_item_names(encode_round([[1, 3, 4, 1, [0]]], modern), "1.1.8", _items),
+		["Wooden Sword"], "socketed item with one gem decodes to its name")
+	eq(dec.decode_item_names(encode_round([[1, 3, 4, 1, [63]]], modern), "1.1.8", _items),
+		["Wooden Sword"], "empty-socket gem id (63) accepted")
+	eq(dec.decode_item_names(encode_round([[1, 3, 4, 0, []], [0, 1, 2, 2, []]], modern), "1.1.8", _items),
+		["Wooden Sword", "Stone"], "hasGems=0 consumes no gem bits")
+	# Socket count drives the gem loop width: Rib Saw Blade (index 43) has
+	# 3 sockets, so hasGems=1 must consume exactly 3 * 6 gem bits.
+	eq(dec.decode_item_names(encode_round([[43, 2, 3, 1, [1, 2, 63]]], modern), "1.1.8", _items),
+		["Rib Saw Blade"], "3-socket item consumes a 3-gem block")
+
+	# Magic Ring persists: the reader must consume its 12-bit blob exactly,
+	# or the trailing padding would decode as another item.
+	eq(dec.decode_item_names(encode_round([[0, 1, 2, 1, []], [505, 3, 4, 2, []]], modern), "1.1.8", _items),
+		["Stone", "Magic Ring"], "Magic Ring persistence blob consumed")
+	# Superior Ring also carries effects but nothing persists: the next item
+	# starts right after the 2-bit field.
+	eq(dec.decode_item_names(encode_round([[506, 3, 4, 2, []], [0, 5, 6, 3, []]], modern), "1.1.8", _items),
+		["Superior Ring", "Stone"], "Superior Ring consumes no persistence blob")
+
+	# Version gate: 1.1.0 exactly reads modern index widths, older boards
+	# 9-bit indexes against the baked legacy count of 510.
+	eq(dec.decode_item_names(encode_round([[1, 3, 4, 1, [0]]], modern), "1.1.0", _items),
+		["Wooden Sword"], "1.1.0 exactly reads modern item data widths")
+	eq(dec.decode_item_names(encode_round([[1, 3, 4, 1, [0]]], 510), "1.0.9", _items),
+		["Wooden Sword"], "pre-1.1.0 boards read 9-bit legacy indexes")
+
+	# Failure modes: every one is null, never an error.
+	eq(dec.decode_item_names(encode_round([[331, 1, 1, 1, []]], modern), "1.1.8", _items),
+		null, "index without a scene returns null")
+	eq(dec.decode_item_names(encode_round([[modern, 1, 1, 1, []]], modern), "1.1.8", _items),
+		null, "index >= num_items returns null")
+	eq(dec.decode_item_names(encode_round([[1, 1, 1, 1, [34]]], modern), "1.1.8", _items),
+		null, "gem index beyond num_gems returns null")
+	var trunc = BitWriterScript.new()
+	trunc.push(123, 999)
+	trunc.push(456, 999)
+	trunc.push_bitsize(0, 8)
+	eq(dec.decode_item_names(trunc.to_godot_string(), "1.1.8", _items),
+		null, "stream dying mid-item returns null")
+	eq(dec.decode_item_names("~", "1.1.8", _items),
+		null, "non-6-bit character returns null")
+
+	# A null descriptor at an in-range index (production ItemBook can leave
+	# descriptorList holes) is null, never an error - distinguishable from a
+	# valid decode of the very same stream.
+	eq(dec.decode_item_names(encode_round([[3, 1, 1, 1, []]], modern), "1.1.8", _items),
+		["Broom"], "same stream decodes when the descriptor exists")
+	var hole = DumpItemDataScript.new(_dump)
+	hole._null_index = 3
+	eq(dec.decode_item_names(encode_round([[3, 1, 1, 1, []]], modern), "1.1.8", hole),
+		null, "null descriptor at an in-range index returns null")
+
+# Decoding the committed golden DB through the real seam: every decoded
+# name must exist in the item data (the decoder cannot invent names), and
+# the bulk of rounds must decode (ADR 0002: ~98%, game-parity ceiling).
+func test_decode_golden_smoke() -> void:
+	print("[TEST] board decode smoke (golden DB x item dump)")
+	var golden_path = ProjectSettings.globalize_path("res://").plus_file("../../seeder/LeaderboardSeeder.Tests/Fixtures/ghosts-fixture-64.gdb")
+	if not File.new().file_exists(golden_path):
+		# The file is committed; absence is a broken checkout, never a skip.
+		ok(false, "golden fixture missing: " + golden_path)
+		return
+	var g = make_ghost(golden_path, user_path("golden_decode.log"), funcref(self, "golden_parse"))
+	var res = g.db.load_ghosts({
+		"player_r": 270.231926, "estimated_rank": 32, "db_row_count": 64,
+		"player_id": 1, "window": 64,
+	})
+	eq(res.get("ok"), true, "golden DB loads for decode smoke")
+	var known = {}
+	for row in _dump["items"]:
+		if row["name"] != null:
+			known[row["name"]] = true
+	var rounds = 0
+	var decoded = 0
+	var names = 0
+	for run in res.get("runs"):
+		for day in range(18):
+			if not run.has(str(day)):
+				continue
+			rounds += 1
+			var decoded_names = _decoder.decode_item_names(str(run[str(day)]), "1.1.8", _items)
+			if decoded_names == null:
+				continue
+			decoded += 1
+			names += decoded_names.size()
+			for iname in decoded_names:
+				if not known.has(iname):
+					ok(false, "decoded name not in the item data: " + str(iname))
+	ok(rounds > 0, "golden blobs carry day boards (rounds=%d)" % rounds)
+	ok(decoded > 0, "at least one golden round decodes headless")
+	ok(decoded * 5 >= rounds * 4, "at least 80%% of rounds decode (%d of %d)" % [decoded, rounds])
+	ok(names > 0, "decodes yield item names (%d total)" % names)
+
+# The adapter validates every exclude_items name against the ItemBook item data
+# at load: unknown names warn (typos in ghost_filter.json must surface in
+# bbof.log) but never block the download. Runs the real SteamWorkshop
+# script; the test project's ItemBook autoload stub carries the known names.
+func test_filter_unknown_item_warn() -> void:
+	print("[TEST] filter unknown-item warn (load-time, non-blocking)")
+	var sw = SteamWorkshopScript.new()
+	var log_path = user_path("filter_warn.log")
+	var dir = Directory.new()
+	if dir.file_exists(log_path):
+		dir.remove(log_path)
+	# Same script resource as SteamWorkshop's own preload, or the typed
+	# `var _log: BbofLog` rejects the instance.
+	var blog = load("res://Core/BbofLog.gd").new()
+	blog.open(log_path)
+	sw._log = blog
+	var filter_path = user_path("filter_warn.json")
+	var f = File.new()
+	f.open(filter_path, File.WRITE)
+	f.store_line(to_json({"exclude_items": ["Wooden Sword", "Not An Item"]}))
+	f.close()
+	sw._filter_path = filter_path
+	sw._load_filter()
+	blog.close()
+	eq(sw._excl_items, ["Wooden Sword", "Not An Item"], "warn never blocks: exclusions still load")
+	var text = log_text(log_path)
+	ok(text.find("filter_unknown_item name=Not An Item") != -1, "unknown item name warns")
+	ok(text.find("filter_unknown_item name=Wooden Sword") == -1, "known item name stays silent")
+	sw.free()
+
 # --- BitStream port ----------------------------------------------------------
 
-# The port is pure math, so it is unit-testable headless (unlike the decode
-# family, which only runs inside the game - ADR 0002). "^A" encodes bits
-# [1,0,0,0,0,0, 0,0,0,0,1,1] via 6-bit-per-char, offset 62.
+# The port is pure math, so it is unit-testable headless - like the board
+# decoder since decode_item_names took the item-data parameter (ADR 0002).
+# "^A" encodes bits [1,0,0,0,0,0, 0,0,0,0,1,1] via 6-bit-per-char, offset 62.
 func test_bitstream_port() -> void:
 	var bs = BitStreamScript.new()
 	ok(bs.from_godot_string("^A"), "6-bit chars decode")

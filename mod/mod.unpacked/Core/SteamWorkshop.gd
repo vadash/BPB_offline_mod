@@ -40,6 +40,7 @@ var _decoder
 
 func _ready():
 	var exe_dir = OS.get_executable_path().get_base_dir()
+	_dump_items(exe_dir)
 	_db_path = exe_dir + "/ghosts.gdb"
 	_state_path = exe_dir + "/player_state.json"
 	_filter_path = exe_dir + "/ghost_filter.json"
@@ -50,6 +51,36 @@ func _ready():
 	_ghost.setup(_db_path, _log, funcref(self, "_parse_single"))
 	_decoder = BoardDecoder.new()
 	call_deferred("_load_from_db")
+
+
+# Item-data dump (ADR 0002): every start rewrites item_book_dump.json next
+# to the exe - the ItemBook facts the board decoder reads (exact names,
+# socket counts, scene presence, effects). Always fresh after game updates;
+# the copy kept in mod/tests/fixtures/ feeds the headless decode tests and
+# doubles as the exact item-name reference for authoring ghost_filter.json.
+func _dump_items(exe_dir: String) -> void:
+	var n = min(int(ItemBook.getNumItems()), int(ItemBook.descriptorList.size()))
+	var sockets: Array = ItemBook.numSockets
+	var items = []
+	for i in range(n):
+		var d = ItemBook.getDescriptorFromIndex(i)
+		items.push_back({
+			"name": d.getName() if d != null else null,
+			"sockets": int(sockets[i]) if i < sockets.size() else 0,
+			"scene": d != null and d.get("scene") != null,
+			"effects": d.getP("effects") if d != null and d.hasParam("effects") else null,
+		})
+	var f = File.new()
+	if f.open(exe_dir + "/item_book_dump.json", File.WRITE) != OK:
+		print("bbof: item_book_dump.json not written (dir not writable)")
+		return
+	f.store_line(to_json({
+		"game_version": str(Game.VERSION),
+		"num_gems": int(ItemBook.getNumGems()),
+		"num_items": items.size(),
+		"items": items,
+	}))
+	f.close()
 
 
 func _notification(what: int) -> void:
@@ -197,6 +228,12 @@ func _load_filter() -> void:
 			return
 	_excl_classes = raw_classes
 	_excl_items = raw_items
+	# A name the item data does not know can never match a decode; warn
+	# once at load so typos in ghost_filter.json surface in bbof.log. Never
+	# blocks the download - exclusions stay loaded as given.
+	for v in raw_items:
+		if not ItemBook.items.has(v):
+			_log.warn("filter_unknown_item name=" + v)
 	_log.info("filter loaded classes=%d items=%d" % [raw_classes.size(), raw_items.size()])
 
 
@@ -217,7 +254,9 @@ func _filter_run(run) -> String:
 	if rounds != null and _excl_items.size() > 0:
 		var version = str(run.get("entryVersion"))
 		for i in range(rounds.size()):
-			var names = _decoder.decode_item_names(str(rounds[i]), version)
+			# The ItemBook global is the item-data seam argument (ADR 0002) -
+			# BoardDecoder itself never touches the global.
+			var names = _decoder.decode_item_names(str(rounds[i]), version, ItemBook)
 			if names == null:
 				continue
 			for iname in names:

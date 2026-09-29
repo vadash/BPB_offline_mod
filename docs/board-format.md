@@ -53,5 +53,7 @@ mod GDScript recurses unboundedly inside the game and crashes the process
 player's own boards (1.1.8), with and without `fromSerialized` init; see
 ADR 0002. `isRoundValid` / `deserializeItems` return unusable values by
 name. Data-only lookups (`Game.getClassName`, `RunDatabase.parseSingleScore`)
-are safe. The mod therefore decodes boards itself (BitStream port + baked
-per-item tables) and never calls the game's decode family.
+are safe. The mod therefore decodes boards itself (BitStream port + an
+item-data parameter: live `ItemBook` reads in production, the committed
+`item_book_dump.json` in headless tests) and never calls the game's decode
+family.

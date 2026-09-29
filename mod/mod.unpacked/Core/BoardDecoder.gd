@@ -3,11 +3,15 @@ extends Reference
 # Mod-side board decoder (docs/board-format.md, ADR 0002). Port of the
 # game's RunData.deserializeStream restricted to what exclusions need: the
 # display names of every item in one round. Never calls the game's decode
-# family - by-name calls into it crash the process (ADR 0002). Game data
-# comes from safe ItemBook data lookups only. Baked constants (health and
-# stamina range 999, 10x10 inventory cells) come from the recovered game
-# sources (Game.MAX_HEALTH, Inventory.MAX_SIZE) and are the first thing to
-# re-check after a game update.
+# family - by-name calls into it crash the process (ADR 0002). Item facts
+# arrive through the item_data parameter (duck-typed: getNumItems,
+# getNumGems, getNumSockets, getDescriptorFromIndex with descriptor
+# getName/get/getP) - the SteamWorkshop adapter passes the ItemBook global,
+# headless tests pass the committed item_book_dump.json (ADR 0002
+# amendment). Baked constants (health and stamina range 999, 10x10
+# inventory cells) come from the recovered game sources (Game.MAX_HEALTH,
+# Inventory.MAX_SIZE) and are the first thing to re-check after a game
+# update.
 
 const BitStreamReader = preload("res://Core/BitStream.gd")
 
@@ -22,28 +26,28 @@ const LEGACY_NUM_ITEMS = 510
 
 # Display names of every item in the round, or null when the stream is
 # invalid. null means "cannot match exclusions on this round" - never a
-# player-visible error.
-func decode_item_names(round_string: String, entry_version: String):
+# player-visible error. item_data: the duck-typed item facts (see header).
+func decode_item_names(round_string: String, entry_version: String, item_data):
 	var bs = BitStreamReader.new()
 	if not bs.from_godot_string(round_string):
 		return null
 	if bs.pull(MAX_HEALTH) == -1 or bs.pull(MAX_STAMINA) == -1:
 		return null
 
-	var numGems = ItemBook.getNumGems()
+	var numGems = item_data.getNumGems()
 	var gemRange = _binary_ceil(numGems + 1)
 	var emptySocketId = gemRange - 1
 
 	var numItems = LEGACY_NUM_ITEMS
 	if _later_or_equal(entry_version, "1.1.0"):
-		numItems = ItemBook.getNumItems()
+		numItems = item_data.getNumItems()
 
 	var names: Array = []
 	while bs.bits_left() >= 8:
 		var index = bs.pull(numItems)
 		if index == -1 or index >= numItems:
 			return null
-		var descriptor = ItemBook.getDescriptorFromIndex(index)
+		var descriptor = item_data.getDescriptorFromIndex(index)
 		if descriptor == null or descriptor.get("scene") == null:
 			return null
 		if bs.pull(INVENTORY_X) == -1 or bs.pull(INVENTORY_Y) == -1:
@@ -54,7 +58,7 @@ func decode_item_names(round_string: String, entry_version: String):
 		var name = descriptor.getName()
 		names.push_back(name)
 
-		var numSockets = ItemBook.getNumSockets(index)
+		var numSockets = item_data.getNumSockets(index)
 		if numSockets > 0:
 			var hasGems = bs.pull(2)
 			if hasGems == -1:
