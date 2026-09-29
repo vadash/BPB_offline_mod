@@ -12,5 +12,11 @@ func onSteamRunsReceived(_runs) -> void:
 	pass
 
 
-func parseSingleScore(_dict, _a, _b) -> Dictionary:
-	return {}
+func parseSingleScore(_dict, _a, _b):
+	# Documented game contract (Core/SteamWorkshop.gd migration comment):
+	# the parser's steamFields require "ugc" — a metadata dict without it
+	# parses to nothing. GhostDb and the adapter inject ugc before calling;
+	# pushed metadata never carries it natively.
+	if not _dict.has("ugc"):
+		return null
+	return {"characterClass": 0}

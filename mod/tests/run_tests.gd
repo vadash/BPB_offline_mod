@@ -68,6 +68,7 @@ func _initialize() -> void:
 	test_decode_golden_smoke()
 	test_bitstream_port()
 	test_filter_unknown_item_warn()
+	test_push_anchor()
 	print("")
 	print("checks=%d failures=%d" % [checks, failures])
 	quit(1 if failures > 0 else 0)
@@ -722,3 +723,52 @@ func test_bitstream_port() -> void:
 	eq(fresh.pull(999), -1, "dry pull of wide field returns -1")
 	ok(not BitStreamScript.new().from_godot_string("~"), "offset 64 rejected")
 	ok(not BitStreamScript.new().from_godot_string("!"), "offset below 0 rejected")
+
+# 10. Push anchor: a ranked upload must move the class anchor even though
+# pushed metadata never carries ugc — the adapter injects it before the
+# game's parser, same as GhostDb and the legacy-state migration do. Without
+# the injection every push parses classless and no anchor ever moves.
+func test_push_anchor() -> void:
+	print("[TEST] push anchor (ugc-less pushed metadata still moves the anchor)")
+	var db_path = user_path("push_anchor.db")
+	var rows = []
+	for rank in range(1, 4):
+		rows.append(FIXTURE.row(1000 + rank, rank, '{"score":%d}' % rank, {"r": 11.0 - rank}))
+	FIXTURE.build(db_path, 1, rows)
+	var sw = SteamWorkshopScript.new()
+	var log_path = user_path("push_anchor.log")
+	var dir = Directory.new()
+	if dir.file_exists(log_path):
+		dir.remove(log_path)
+	# Same script resource as SteamWorkshop's own preload, or the typed
+	# `var _log: BbofLog` rejects the instance.
+	var blog = load("res://Core/BbofLog.gd").new()
+	blog.open(log_path)
+	sw._log = blog
+	sw._db_path = db_path
+	sw._ghost = GhostDbScript.new()
+	sw._ghost.setup(db_path, blog, funcref(sw, "_parse_single"))
+	var state_path = user_path("push_anchor_state.json")
+	if dir.file_exists(state_path):
+		dir.remove(state_path)
+	sw._state_path = state_path
+	# Pushed metadata carries r/p/d but never ugc. Class 0's anchor must
+	# move to r=8.5: two ghosts rank above it (r=10.0, r=9.0), so rank 3.
+	sw.pushScore('{"r":8.5,"p":"tester","d":"ODxx"}', 1)
+	eq(sw._player_state.get("r_by_class", {}).get("0", null), 8.5, "push writes the class anchor")
+	eq(int(sw._player_state.get("estimated_rank", -1)), 3, "push re-estimates the rank")
+	eq(int(sw._player_state.get("anchor_class", -1)), 0, "push pins the anchor class")
+	var text = log_text(log_path)
+	ok(text.find("push no_class") == -1, "no no_class warn")
+	ok(text.find("push db_ok rows=3 rank=3 class=0") != -1, "anchor log line present")
+	# Sidecar persisted for the next session's window centering.
+	var f = File.new()
+	var saved = {}
+	if f.file_exists(state_path) and f.open(state_path, File.READ) == OK:
+		var p = JSON.parse(f.get_as_text())
+		f.close()
+		if p.error == OK and typeof(p.result) == TYPE_DICTIONARY:
+			saved = p.result
+	eq(saved.get("r_by_class", {}).get("0", null), 8.5, "anchor persisted to player_state.json")
+	blog.close()
+	sw.free()

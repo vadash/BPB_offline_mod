@@ -357,6 +357,11 @@ func pushScore(_steamMetaDataString: String, _sequenceNumber: int) -> void:
 			# The uploaded run's class comes from its own metadata, through
 			# the game's safe parser — never game decode calls.
 			var cls = -1
+			# Same injection as the migration path: the game's parser requires
+			# ugc (steamFields = sharedFields + ["ugc", "p"]) and pushed
+			# metadata never carries it. Without it every ranked push parses
+			# classless and the anchor never moves.
+			parsed.result["ugc"] = 1
 			var run = _parse_single(parsed.result)
 			if run != null:
 				cls = int(run.get("characterClass"))
