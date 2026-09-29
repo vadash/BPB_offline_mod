@@ -8,8 +8,9 @@ class_name SteamLeaderboard
 # ghost-DB read to Core/GhostDb.gd. Upload path persists player state to
 # player_state.json (sidecar, not in DB): per-class ranked ratings
 # (r_by_class), the anchored class + rank estimate, sequence number, min-d
-# cutoff. Download path reads ghosts.gdb placed next to the game executable
-# (BGDB v1, written by the seeder), centered on the current class's anchor.
+# cutoff. Download path reads the newest top-level *.gdb next to the game
+# executable (GhostDb.pick_db_path, fixed once at startup; BGDB v1, written
+# by the seeder), centered on the current class's anchor.
 # ---------------------------------------------------------------------------
 
 const BbofLog = preload("res://Core/BbofLog.gd")
@@ -41,11 +42,13 @@ var _decoder
 func _ready():
 	var exe_dir = OS.get_executable_path().get_base_dir()
 	_dump_items(exe_dir)
-	_db_path = exe_dir + "/ghosts.gdb"
 	_state_path = exe_dir + "/player_state.json"
 	_filter_path = exe_dir + "/ghost_filter.json"
 	_log = BbofLog.new()
 	_log.open(exe_dir + "/bbof.log")
+	# Newest-DB pick: any top-level *.gdb next to the exe wins by mtime;
+	# fixed for the session (GhostDb.pick_db_path logs the fallback miss).
+	_db_path = GhostDb.pick_db_path(exe_dir, _log)
 	_log.info("init steam_id=%s db=%s" % [SteamHelper.STEAM_ID, _db_path.get_file()])
 	_ghost = GhostDb.new()
 	_ghost.setup(_db_path, _log, funcref(self, "_parse_single"))

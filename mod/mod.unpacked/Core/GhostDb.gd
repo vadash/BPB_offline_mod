@@ -8,7 +8,9 @@ extends Reference
 # BGDB v1 file (docs/ghost-db-format.md) with plain File seek/read only. The
 # header + dense-rank arrays are cached lazily per instance (the adapter
 # holds one GhostDb for the session); the cache reloads when the file's
-# mtime changes, so a seeder-replaced DB is picked up mid-session. Metadata
+# mtime changes, so a seeder-replaced DB is picked up mid-session. Which
+# file is loaded is pick_db_path's decision: the newest top-level *.gdb in
+# the game folder, resolved once at startup. Metadata
 # blobs are always read on demand, never cached. Vocabulary: a "ghost" is
 # one parsed opponent run; the "opponent window" is the rank range ghosts
 # are drawn from; the "min-d cutoff" is the oldest ghost version the live
@@ -21,6 +23,40 @@ const FORMAT_VERSION = 1
 # Probe cap: runs examined oldest-d first before giving up (the old SQL
 # LIMIT 200 on the probe query).
 const PROBE_SCAN_LIMIT = 200
+
+# Literal fallback DB name for the newest-DB pick (pick_db_path).
+const FALLBACK_DB_NAME = "ghosts.gdb"
+
+# Newest-DB pick: the newest top-level *.gdb in dir is the Ghost DB the
+# adapter loads (mtime; same-second tie -> lexicographically largest name,
+# so date-suffixed names sort the newer date last). Directories named *.gdb
+# never qualify; the extension matches case-insensitively. No candidates ->
+# the literal ghosts.gdb path, so the miss surfaces as the usual
+# db_open_fail. Resolved once at startup; a same-path replacement is still
+# picked up mid-session by _refresh_cache. logger (optional) gets one info
+# line when the pick falls back.
+static func pick_db_path(dir: String, logger = null) -> String:
+	var best_name: String = ""
+	var best_mtime: int = -1
+	var d = Directory.new()
+	if d.open(dir) == OK:
+		d.list_dir_begin(true)
+		var name = d.get_next()
+		while name != "":
+			if not d.current_is_dir() and name.to_lower().ends_with(".gdb"):
+				# get_modified_time returns 0 on error: oldest, but still
+				# eligible inside an all-0 tie.
+				var mtime = int(File.new().get_modified_time(dir.plus_file(name)))
+				if mtime > best_mtime or (mtime == best_mtime and name > best_name):
+					best_name = name
+					best_mtime = mtime
+			name = d.get_next()
+		d.list_dir_end()
+	if best_name == "":
+		if logger != null:
+			logger.info("db_none_found dir=%s fallback=%s" % [dir, FALLBACK_DB_NAME])
+		return dir.plus_file(FALLBACK_DB_NAME)
+	return dir.plus_file(best_name)
 
 var _db_path: String
 var _log

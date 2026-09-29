@@ -59,6 +59,7 @@ func _initialize() -> void:
 	test_window()
 	test_zero_parse_fallback()
 	test_estimate_rank()
+	test_pick_db()
 	test_filter_exclusions()
 	test_refill()
 	test_class_anchor()
@@ -169,6 +170,34 @@ func log_text(log_path: String) -> String:
 	var text = f.get_as_text()
 	f.close()
 	return text
+
+# Fresh empty folder for pick tests (user:// persists across runs).
+func _fresh_dir(path: String) -> void:
+	_rmtree(path)
+	Directory.new().make_dir_recursive(path)
+
+func _rmtree(path: String) -> void:
+	var d = Directory.new()
+	if not d.dir_exists(path):
+		return
+	d.open(path)
+	d.list_dir_begin(true)
+	var name = d.get_next()
+	while name != "":
+		if d.current_is_dir():
+			_rmtree(path.plus_file(name))
+		else:
+			d.remove(path.plus_file(name))
+		name = d.get_next()
+	d.list_dir_end()
+	d.remove(path)
+
+# Tiny candidate file; content is irrelevant to the pick (names + mtime only).
+func _touch(path: String) -> void:
+	var f = File.new()
+	f.open(path, File.WRITE)
+	f.store_8(0)
+	f.close()
 
 # --- tests ------------------------------------------------------------------
 
@@ -296,6 +325,60 @@ func test_estimate_rank() -> void:
 	eq(g.db.estimate_rank(0.5), 4, "all ghosts above r=0.5 -> rank 4")
 	eq(g.db.estimate_rank(3.0), 1, "top ghost -> rank 1")
 	eq(g.db.estimate_rank(9.9), 1, "above every ghost -> rank 1")
+
+# 5b. Newest-DB pick: the newest top-level *.gdb in the game folder is the
+# loaded Ghost DB (mtime; same-second tie -> lexicographically largest
+# name); no candidates falls back to the literal ghosts.gdb path.
+func test_pick_db() -> void:
+	print("[TEST] newest-db pick (mtime, tie, fallback)")
+	var root = user_path("pick_db")
+
+	# No candidates: literal ghosts.gdb fallback, logged once.
+	_fresh_dir(root)
+	var log_path = user_path("pick.log")
+	var blog = BbofLogScript.new()
+	blog.open(log_path)
+	eq(GhostDbScript.pick_db_path(root, blog), root.plus_file("ghosts.gdb"),
+		"no candidates falls back to ghosts.gdb")
+	ok(log_text(log_path).find("db_none_found") != -1, "fallback is logged")
+
+	# Newest mtime wins; directories named *.gdb are never candidates;
+	# merger-style names are eligible.
+	_fresh_dir(root)
+	_touch(root.plus_file("ghosts.gdb"))
+	Directory.new().make_dir_recursive(root.plus_file("nested.gdb"))
+	OS.delay_msec(1100)
+	_touch(root.plus_file("ghosts_29_09_26.gdb"))
+	eq(GhostDbScript.pick_db_path(root), root.plus_file("ghosts_29_09_26.gdb"),
+		"newest mtime wins, *.gdb dirs skipped, merged-style names eligible")
+
+	# Extension match is case-insensitive: .GDB is a candidate.
+	_fresh_dir(root)
+	_touch(root.plus_file("a.gdb"))
+	OS.delay_msec(1100)
+	_touch(root.plus_file("B.GDB"))
+	eq(GhostDbScript.pick_db_path(root), root.plus_file("B.GDB"),
+		".GDB candidate wins on mtime")
+
+	# Same-second tie -> lexicographically largest name. mtime has 1-second
+	# resolution, so retry until both fixtures land in the same second.
+	_fresh_dir(root)
+	var probe = File.new()
+	var tied = false
+	for attempt in range(6):
+		_touch(root.plus_file("b.gdb"))
+		_touch(root.plus_file("a.gdb"))
+		if int(probe.get_modified_time(root.plus_file("b.gdb"))) \
+				== int(probe.get_modified_time(root.plus_file("a.gdb"))):
+			tied = true
+			break
+		_fresh_dir(root)
+		OS.delay_msec(1100)
+	ok(tied, "tie fixture created (same-second mtimes)")
+	eq(GhostDbScript.pick_db_path(root), root.plus_file("b.gdb"),
+		"same-second tie -> largest name")
+
+	_rmtree(root)
 
 # 6. Ghost exclusions: an injected filter_fn labels runs to drop. GhostDb
 # only forwards runs to the filter — it never reads run fields itself.
