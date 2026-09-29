@@ -25,7 +25,7 @@ Single-purpose CLI tool that scrapes the "bpb-runs3" Steam leaderboard, enriches
 1. **Init Steam** — P/Invokes `steam_api64.dll` via `Steam` static class. Tries `SteamAPI_InitFlat` first (newer SDK), falls back to `SteamAPI_InitSafe`. Gracefully handles `EntryPointNotFoundException` for version mismatches.
 2. **Fetch leaderboard** — Finds the leaderboard handle, then downloads entries in 5000-entry batches (4 concurrent requests) via async Steam callback polling (`SteamAPI_RunCallbacks` loop with `Thread.Sleep`).
 3. **Fetch UGC metadata** — For each distinct Workshop ID in the entries, queries UGC details in 1000-item batches (4 concurrent). Extracts metadata JSON strings from each item.
-4. **Filter & write** — Parses metadata (`r`, `d`), deduplicates by Steam ID, rejects rows without a numeric `r`, keeps only the newest `--keep-d` (default 4) version codes present in the candidates, drops rows below the `--cut-bottom` (default 50) percentile rating floor, then writes the `BGDB` v1 binary layout (gzip-compressed metadata blobs, two-pass via `<final>.tmp` + atomic `File.Move`).
+4. **Filter & write** — Runs the rank-ordered raw entries through `RunFilter` (`LeaderboardSeeder/RunFilter.cs`): `Admit` parses metadata (`r`, `d`), deduplicates by Steam ID (the dedup fires before metadata validation, so a player whose best-rank row has bad or missing metadata is dropped entirely), and rejects rows without a numeric `r`; `Apply` keeps only the newest `--keep-d` (default 4) version codes present in the candidates and drops rows below the `--cut-bottom` (default 50) percentile rating floor. Then writes the `BGDB` v1 binary layout (gzip-compressed metadata blobs, two-pass via `<final>.tmp` + atomic `File.Move`).
 5. **Version report** — Prints per-version kept/cut/total counts after filtering.
 
 ### Merge flow (`--merge <folder>`)
@@ -36,12 +36,12 @@ Memory: the merge holds every input fully in RAM (plus the buffered output), so 
 
 ### Key files
 
-- `Program.cs` — All logic. Decompiled-style source (top-level statements compiled, then decompiled).
+- `Program.cs` — Steam I/O, scrape and merge orchestration, console output. Filtering is delegated to `RunFilter`. Decompiled-style source (top-level statements compiled, then decompiled).
 - `LeaderboardSeeder/GhostDb.cs` — BGDB v1 reader (`GhostDb.Read`) and the single writer (`GhostDb.Write`); seeder and merger both write through it.
 - `LeaderboardSeeder/Merger.cs` — Merger: content-based dedup, union filtering via `RunFilter`, folder orchestration (`RunMerge`).
 - `LeaderboardSeeder/Steam.cs` — Flat P/Invoke bindings to `steam_api64.dll`. Uses `nint` for interface pointers. Includes version-paired accessors (`v018`/`v017`, `v013`/`v012`, `v021`/`v018`).
 - `LeaderboardSeeder/Entry.cs` — Record type for a filtered leaderboard row.
-- `LeaderboardSeeder/RunFilter.cs` — Pure filter helpers: version-window selection and rating-floor percentile.
+- `LeaderboardSeeder/RunFilter.cs` — Run-filter pipeline shared by the scrape and merge paths: `Admit` (scrape admission: metadata validation, steam-id dedup, per-version totals) and `Apply` (dedup mode, version window, rating floor, per-code stats); plus the pure `VersionWindow`/`RatingFloor` helpers.
 - `LeaderboardSeeder/*.cs` — Struct definitions matching Steam SDK callback layouts (`LeaderboardEntryT`, `LeaderboardFindResultT`, `LeaderboardScoresDownloadedT`, `SteamErrMsg`). `KiCallback` constants (1104, 1105, 3401) are Steam callback type IDs.
 
 ### Steam API quirks

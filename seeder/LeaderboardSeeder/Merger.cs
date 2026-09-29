@@ -22,39 +22,29 @@ internal static class Merger
 	public static MergeResult Merge(IList<(string Name, IReadOnlyList<Entry> Rows, int Rejected)> inputs, int keepD, int cutBottom)
 	{
 		List<Entry> union = new List<Entry>();
+		List<string> tags = new List<string>();
+		foreach ((string name, IReadOnlyList<Entry> rows, int _) in inputs)
+		{
+			union.AddRange(rows);
+			tags.AddRange(Enumerable.Repeat(name, rows.Count));
+		}
+		RunFilter.FilterResult filtered = RunFilter.Apply(union, RunFilter.Dedup.SteamIdAndContent,
+			new RunFilter.FilterSettings(keepD, cutBottom), tags);
+		Dictionary<string, int> duplicates = filtered.InputDups.ToDictionary(d => d.Input, d => d.Duplicates);
 		List<InputReport> reports = new List<InputReport>(inputs.Count);
-		HashSet<(ulong SteamId, string Metadata)> seen = new HashSet<(ulong, string)>();
 		foreach ((string name, IReadOnlyList<Entry> rows, int rejected) in inputs)
 		{
-			int duplicates = 0;
-			foreach (Entry row in rows)
-			{
-				// duplicate = same steam id and byte-identical metadata text
-				if (!seen.Add((row.SteamId, row.Metadata)))
-				{
-					duplicates++;
-					continue;
-				}
-				union.Add(row);
-			}
-			reports.Add(new InputReport(name, rows.Count + rejected, rejected, duplicates));
+			reports.Add(new InputReport(name, rows.Count + rejected, rejected, duplicates.GetValueOrDefault(name)));
 		}
 
-		HashSet<string> window = new HashSet<string>(RunFilter.VersionWindow(union.Select(e => e.D.Substring(0, 2)), keepD));
-		List<Entry> inWindow = union.Where(e => window.Contains(e.D.Substring(0, 2))).ToList();
-		int windowCut = union.Count - inWindow.Count;
-
-		double floor = RunFilter.RatingFloor(inWindow.Select(e => e.R), cutBottom);
-		List<Entry> kept = inWindow.Where(e => e.R >= floor).ToList();
-		int floorCut = inWindow.Count - kept.Count;
-
+		List<Entry> kept = filtered.Kept.ToList();
 		kept.Sort((a, b) =>
 		{
 			int byRating = b.R.CompareTo(a.R);
 			return byRating != 0 ? byRating : a.SteamId.CompareTo(b.SteamId);
 		});
 
-		return new MergeResult(kept, reports, windowCut, floorCut);
+		return new MergeResult(kept, reports, filtered.WindowCut, filtered.FloorCut);
 	}
 
 	// Folder orchestration: scan top-level *.gdb (skipping the merged output

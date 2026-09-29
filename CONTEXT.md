@@ -66,6 +66,10 @@ _Avoid_: min version, version floor
 Bottom fraction of runs by `r` excluded from the ghost DB. Seeder-side percentile over the runs that survive version selection.
 _Avoid_: rank cut, trim, percentile filter
 
+**Run filter**:
+The shared pipeline both seeder paths run rows through: admission, dedup, version window, rating floor. Lives in the seeder; the merger runs it over the union of its input ghost DBs.
+_Avoid_: pruning, filtering step
+
 **Version code**:
 First two characters of a run's `d` string (`OC`, `OD`, …). The unit both tools use to order and filter versions; the rest of `d` is opaque packed bytes.
 _Avoid_: version string (bare), build tag

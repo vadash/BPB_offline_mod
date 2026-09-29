@@ -7,7 +7,6 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.IO.Compression;
 using System.Text;
-using System.Text.Json;
 using System.Threading;
 using LeaderboardSeeder;
 
@@ -19,9 +18,9 @@ internal class Program
 		string text = Path.Combine(Path.GetDirectoryName(Environment.ProcessPath) ?? ".", "ghosts.gdb");
 		string? mergeDir = null;
 		bool dbFromFlag = false;
-		int keepD = 4;
+		int keepD = RunFilter.FilterSettings.Seed.KeepD;
 		bool keepDFromFlag = false;
-		int cutBottom = 50;
+		int cutBottom = RunFilter.FilterSettings.Seed.CutBottom;
 		bool cutBottomFromFlag = false;
 		for (int i = 0; i < args.Length; i++)
 		{
@@ -330,72 +329,27 @@ internal class Program
 		}
 		Console.WriteLine($"\r[OK]  {dictionary.Count:N0} metadata hits in {stopwatch.Elapsed.TotalSeconds:F1}s.{new string(' ', 30)}");
 		Console.Write("[..] Filtering ...");
-		List<Entry> list2 = new List<Entry>();
-		List<Entry> candidates = new List<Entry>();
-		HashSet<ulong> hashSet = new HashSet<ulong>();
-		Dictionary<string, int[]> stats = new Dictionary<string, int[]>();
-		foreach (var item4 in list.OrderBy(e => e.rank))
+		List<LeaderboardEntryT> rankOrderedRaw = list
+			.OrderBy(e => e.rank)
+			.Select(e => new LeaderboardEntryT { m_steamIDUser = e.steamId, m_nGlobalRank = e.rank, m_nScore = e.score, m_hUGC = e.workshopId })
+			.ToList();
+		RunFilter.AdmitResult admit = RunFilter.Admit(rankOrderedRaw, dictionary);
+		RunFilter.FilterSettings settings = keepDFromFlag || cutBottomFromFlag
+			? new RunFilter.FilterSettings(keepD, cutBottom)
+			: RunFilter.FilterSettings.Seed;
+		RunFilter.FilterResult filtered = RunFilter.Apply(
+			admit.Candidates,
+			RunFilter.Dedup.None,
+			settings,
+			perCodeTotals: admit.PerCode);
+		Console.WriteLine($" {admit.Candidates.Count:N0} parseable, rating floor {filtered.Floor:R}, cut {filtered.FloorCut:N0} below floor.");
+		Console.WriteLine($"[..] {filtered.Kept.Count:N0} valid (pruned {list.Count - filtered.Kept.Count:N0} invalid/filtered entries, last {settings.KeepD} versions, bottom {settings.CutBottom}%).");
+		foreach (RunFilter.CodeStat stat in filtered.PerCode)
 		{
-			if (item4.workshopId == 0L || !hashSet.Add(item4.steamId) || !dictionary.TryGetValue(item4.workshopId, out var value5))
-			{
-				continue;
-			}
-			double r = 0.0;
-			string? text4 = null;
-			try
-			{
-				using JsonDocument jsonDocument = JsonDocument.Parse(value5);
-				JsonElement rootElement = jsonDocument.RootElement;
-				if (!rootElement.TryGetProperty("r", out var value6) || value6.ValueKind != JsonValueKind.Number)
-				{
-					continue;
-				}
-				r = value6.GetDouble();
-				if (rootElement.TryGetProperty("d", out var value8) && value8.ValueKind == JsonValueKind.String)
-				{
-					text4 = value8.GetString();
-				}
-			}
-			catch
-			{
-				continue;
-			}
-			string key = (text4 != null && text4.Length >= 2) ? text4.Substring(0, 2) : "?";
-			if (!stats.TryGetValue(key, out var stat))
-			{
-				stat = new int[2];
-				stats[key] = stat;
-			}
-			stat[0]++;
-			if (text4 != null && text4.Length >= 2)
-			{
-				candidates.Add(new Entry(item4.steamId, item4.rank, item4.workshopId, r, text4, value5));
-			}
-		}
-		HashSet<string> window = new HashSet<string>(RunFilter.VersionWindow(candidates.Select(e => e.D.Substring(0, 2)), keepD));
-		List<Entry> inWindow = candidates.Where(e => window.Contains(e.D.Substring(0, 2))).ToList();
-		double floor = RunFilter.RatingFloor(inWindow.Select(e => e.R), cutBottom);
-		int floorCut = 0;
-		foreach (var item5 in inWindow)
-		{
-			if (item5.R >= floor)
-			{
-				stats[item5.D.Substring(0, 2)][1]++;
-				list2.Add(item5);
-			}
-			else
-			{
-				floorCut++;
-			}
-		}
-		Console.WriteLine($" {candidates.Count:N0} parseable, rating floor {floor:R}, cut {floorCut:N0} below floor.");
-		Console.WriteLine($"[..] {list2.Count:N0} valid (pruned {list.Count - list2.Count:N0} invalid/filtered entries, last {keepD} versions, bottom {cutBottom}%).");
-		foreach (var stat in stats.OrderBy(s => s.Key, StringComparer.Ordinal))
-		{
-			Console.WriteLine($"     {stat.Key}  kept {stat.Value[1],7:N0}  cut {stat.Value[0] - stat.Value[1],7:N0}  total {stat.Value[0],8:N0}");
+			Console.WriteLine($"     {stat.Code}  kept {stat.Kept,7:N0}  cut {stat.Total - stat.Kept,7:N0}  total {stat.Total,8:N0}");
 		}
 		Console.Write("[..] Writing " + text + " ...");
-		int n = GhostDb.Write(list2, text, (done, total) =>
+		int n = GhostDb.Write(filtered.Kept, text, (done, total) =>
 		{
 			if (done % 10000 == 0)
 			{
