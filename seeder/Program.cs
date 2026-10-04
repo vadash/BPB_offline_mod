@@ -139,6 +139,16 @@ internal class Program
 				AbandonSteam();
 				return 1;
 			}
+			// Init succeeding does not mean the client's web services are
+			// warm: a cold-started client served empty leaderboard pages and
+			// truncated the fetch (25k of 590k rows). Let services settle.
+			Console.Write("[..] Letting Steam services settle (15 s) ...");
+			for (int settled = 0; settled < 15; settled++)
+			{
+				Thread.Sleep(1000);
+				Console.Write(".");
+			}
+			Console.WriteLine(" [OK]");
 		}
 		nint self = GetAccessor(Steam.SteamAPI_SteamFriends_v018, Steam.SteamAPI_SteamFriends_v017);
 		nint pUserStats = GetAccessor(Steam.SteamAPI_SteamUserStats_v013, Steam.SteamAPI_SteamUserStats_v012);
