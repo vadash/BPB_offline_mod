@@ -68,6 +68,7 @@ func _initialize() -> void:
 	test_decode_golden_smoke()
 	test_bitstream_port()
 	test_filter_unknown_item_warn()
+	test_filter_perfect_flag()
 	test_push_anchor()
 	print("")
 	print("checks=%d failures=%d" % [checks, failures])
@@ -702,6 +703,62 @@ func test_filter_unknown_item_warn() -> void:
 	var text = log_text(log_path)
 	ok(text.find("filter_unknown_item name=Not An Item") != -1, "unknown item name warns")
 	ok(text.find("filter_unknown_item name=Wooden Sword") == -1, "known item name stays silent")
+	sw.free()
+
+# exclude_perfect: default on (absent file or key), boolean opt-out, and a
+# non-bool value disables the whole filter — same one-warn convention as the
+# string lists. _filter_run reads RunData.results: first Game.MAX_WINS
+# entries all Win = perfect ghost (finished 10-0); anything else stays.
+func test_filter_perfect_flag() -> void:
+	print("[TEST] filter exclude_perfect (default on, opt-out, malformation)")
+	var perfect = {"characterClass": 0,
+		"results": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 3, 3, 3, 3]}
+	var beaten = {"characterClass": 0,
+		"results": [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 3, 3, 3, 3, 3, 3, 3, 3]}
+	var drawn = {"characterClass": 0,
+		"results": [0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 3, 3, 3, 3, 3, 3, 3]}
+
+	var sw = SteamWorkshopScript.new()
+	var log_path = user_path("filter_perfect.log")
+	var dir = Directory.new()
+	if dir.file_exists(log_path):
+		dir.remove(log_path)
+	# Same script resource as SteamWorkshop's own preload, or the typed
+	# `var _log: BbofLog` rejects the instance.
+	var blog = load("res://Core/BbofLog.gd").new()
+	blog.open(log_path)
+	sw._log = blog
+	sw._filter_path = user_path("filter_perfect_absent.json")
+	# Prior runs leave the file behind; the absent-file case must be real.
+	if dir.file_exists(sw._filter_path):
+		dir.remove(sw._filter_path)
+	sw._load_filter()
+	eq(sw._exclude_perfect, true, "missing file keeps default on")
+	eq(sw._filter_run(perfect), "perfect", "10-0 ghost drops by default")
+	eq(sw._filter_run(beaten), "", "10-1 ghost stays")
+	eq(sw._filter_run(drawn), "", "draw in the first ten is not perfect")
+	eq(sw._filter_run({"characterClass": 0}), "", "no results array stays (cannot match)")
+	eq(sw._filter_run({"characterClass": 0, "results": [0, 0, 0]}), "", "short results array stays")
+
+	var f = File.new()
+	f.open(sw._filter_path, File.WRITE)
+	f.store_line(to_json({"exclude_perfect": false}))
+	f.close()
+	sw._load_filter()
+	eq(sw._exclude_perfect, false, "explicit false wins over the default")
+	eq(sw._filter_run(perfect), "", "opted-out perfect ghost stays")
+
+	f.open(sw._filter_path, File.WRITE)
+	f.store_line(to_json({"exclude_classes": ["Engineer"], "exclude_perfect": "yes"}))
+	f.close()
+	sw._load_filter()
+	eq(sw._exclude_perfect, false, "non-bool flag disables the filter")
+	eq(sw._excl_classes, [], "non-bool flag disables the lists too")
+	eq(sw._filter_run(perfect), "", "disabled filter keeps the perfect ghost")
+	blog.close()
+	var text = log_text(log_path)
+	ok(text.find("filter_malformed") != -1, "non-bool flag warns")
+	ok(text.find("filter loaded classes=0 items=0 perfect=False") != -1, "load line logs the flag")
 	sw.free()
 
 # --- BitStream port ----------------------------------------------------------

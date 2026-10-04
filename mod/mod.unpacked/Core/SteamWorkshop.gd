@@ -35,6 +35,10 @@ var _state_path: String
 var _filter_path: String
 var _excl_classes: Array = []
 var _excl_items: Array = []
+# "exclude_perfect": drop ghosts whose first ten round results are all wins
+# (a finished 10-0 run, CONTEXT.md "Perfect ghost"). Default on: absent file
+# or absent key keeps it active.
+var _exclude_perfect: bool = true
 var _ghost
 var _decoder
 
@@ -197,12 +201,14 @@ func _fail_load(reason: String) -> void:
 
 
 # Read ghost_filter.json next to the exe, fresh on every download. Optional
-# "exclude_classes" / "exclude_items" string arrays; missing file = no-op.
-# Malformed JSON, wrong types, or non-string entries: one warn, both lists
-# treated as empty — a bad filter file never blocks a download.
+# "exclude_classes" / "exclude_items" string arrays plus the boolean
+# "exclude_perfect" (default on). Malformed JSON, wrong types, or non-string
+# entries: one warn, the whole filter is disabled — a bad filter file never
+# blocks a download.
 func _load_filter() -> void:
 	_excl_classes = []
 	_excl_items = []
+	_exclude_perfect = true
 	var f = File.new()
 	if not f.file_exists(_filter_path):
 		_log.info("filter off no ghost_filter.json")
@@ -215,29 +221,39 @@ func _load_filter() -> void:
 	f.close()
 	if p.error != OK or typeof(p.result) != TYPE_DICTIONARY:
 		_log.warn("filter_malformed — exclusions disabled")
+		_exclude_perfect = false
 		return
 	var raw_classes = p.result.get("exclude_classes", [])
 	var raw_items = p.result.get("exclude_items", [])
 	if typeof(raw_classes) != TYPE_ARRAY or typeof(raw_items) != TYPE_ARRAY:
 		_log.warn("filter_malformed — exclusions disabled")
+		_exclude_perfect = false
 		return
 	for v in raw_classes:
 		if typeof(v) != TYPE_STRING:
 			_log.warn("filter_malformed — exclusions disabled")
+			_exclude_perfect = false
 			return
 	for v in raw_items:
 		if typeof(v) != TYPE_STRING:
 			_log.warn("filter_malformed — exclusions disabled")
+			_exclude_perfect = false
 			return
+	var raw_perfect = p.result.get("exclude_perfect", true)
+	if typeof(raw_perfect) != TYPE_BOOL:
+		_log.warn("filter_malformed — exclusions disabled")
+		_exclude_perfect = false
+		return
 	_excl_classes = raw_classes
 	_excl_items = raw_items
+	_exclude_perfect = raw_perfect
 	# A name the item data does not know can never match a decode; warn
 	# once at load so typos in ghost_filter.json surface in bbof.log. Never
 	# blocks the download - exclusions stay loaded as given.
 	for v in raw_items:
 		if not ItemBook.items.has(v):
 			_log.warn("filter_unknown_item name=" + v)
-	_log.info("filter loaded classes=%d items=%d" % [raw_classes.size(), raw_items.size()])
+	_log.info("filter loaded classes=%d items=%d perfect=%s" % [raw_classes.size(), raw_items.size(), str(_exclude_perfect)])
 
 
 # Exclusion filter handed to GhostDb: returns a rule label for runs to drop,
@@ -253,6 +269,19 @@ func _filter_run(run) -> String:
 		var cname = Game.getClassName(int(cc))
 		if cname in _excl_classes:
 			return "class=" + cname
+	# Perfect ghost (CONTEXT.md): first Game.MAX_WINS round results all wins —
+	# a finished 10-0 run. A draw or loss in the first ten disqualifies; a
+	# missing or short results array means "cannot match" and keeps the run.
+	if _exclude_perfect:
+		var results = run.get("results")
+		if results != null and results.size() >= Game.MAX_WINS:
+			var perfect = true
+			for i in range(Game.MAX_WINS):
+				if int(results[i]) != Game.RoundResult.Win:
+					perfect = false
+					break
+			if perfect:
+				return "perfect"
 	var rounds = run.get("rounds")
 	if rounds != null and _excl_items.size() > 0:
 		var version = str(run.get("entryVersion"))
@@ -299,7 +328,7 @@ func _load_from_db() -> void:
 	}
 	# Exclusions active: hand GhostDb the adapter-side filter. GhostDb stays
 	# game-agnostic and only forwards runs to it.
-	if _excl_classes.size() > 0 or _excl_items.size() > 0:
+	if _excl_classes.size() > 0 or _excl_items.size() > 0 or _exclude_perfect:
 		state["filter_fn"] = funcref(self, "_filter_run")
 	var res = _ghost.load_ghosts(state)
 	if not res.ok:

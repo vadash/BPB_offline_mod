@@ -91,7 +91,7 @@ _Avoid_: non-Steam copy
 ## Exclusions
 
 **Exclusion**:
-A user rule that stops ghosts from loading. A ghost is dropped when its hero class matches an excluded class, or any of its boards contains an excluded item. Rules combine with OR.
+A user rule that stops ghosts from loading: an excluded hero class, an excluded item on any board, or perfect-ghost status. Rules combine with OR.
 _Avoid_: blacklist, ban, ignore list
 
 **Item data**:
@@ -107,6 +107,10 @@ _Avoid_: re-query, expansion
 **Class anchor**:
 The per-class rating a session's opponent window is centered on; each class anchors independently. Classes never ranked anchor at the game's fresh-class rating, and unranked runs never move an anchor.
 _Avoid_: cached r, player rating
+
+**Perfect ghost**:
+A ghost whose first ten round results are all wins: a finished 10-0 run. A run that reaches 10 wins with any loss is not perfect.
+_Avoid_: 10-win ghost, flawless ghost, undefeated ghost
 
 **Feasible run**:
 A ghost that has a board for the player's current day; the only candidates for a fight.

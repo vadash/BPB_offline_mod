@@ -1,1 +1,1 @@
-{ "exclude_classes": ["Engineer"], "exclude_items": ["False Life", "Holy Armor"] }
+{ "exclude_classes": ["Engineer"], "exclude_items": ["False Life", "Holy Armor"], "exclude_perfect": true }

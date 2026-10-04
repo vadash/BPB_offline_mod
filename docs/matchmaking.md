@@ -36,7 +36,7 @@ Lower score wins. Per candidate, added up each fight:
 | Rematch within the last 12 fights | up to +1100 (hardest right after) |
 | Class variety | ±0.1; a 3rd same-class fight in a row +22 |
 | Ghost wins vs player wins | +10 per win the ghost has more, +5 per win it has fewer |
-| Perfect ghost (10 wins already) | +1000 — effectively excluded |
+| 10-win ghost (finished its run) | +1000 — effectively excluded |
 | Rating distance | +clamp(\|Δr\| / 1000, 0, 1); +12 if \|Δr\| > 150 |
 | Randomness | +0 … 0.05 |
 
