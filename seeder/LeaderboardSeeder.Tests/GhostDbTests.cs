@@ -47,6 +47,17 @@ public class GhostDbTests
 	}
 
 	[Fact]
+	public void File_names_carry_zero_padded_dd_MM_yy_date()
+	{
+		DateOnly date = new(2026, 10, 4);
+		DateOnly singleDigit = new(2026, 1, 5);
+
+		Assert.Equal("ghosts-04-10-26.gdb", GhostDb.SeedFileName(date));
+		Assert.Equal("ghosts-merged-04-10-26.gdb", GhostDb.MergeFileName(date));
+		Assert.Equal("ghosts-05-01-26.gdb", GhostDb.SeedFileName(singleDigit));
+	}
+
+	[Fact]
 	public void Read_counts_row_without_numeric_r_as_rejected()
 	{
 		List<Entry> rows = new List<Entry>

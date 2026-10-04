@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.IO.Compression;
 using System.Text;
 using System.Threading;
+using Microsoft.Win32;
 using LeaderboardSeeder;
 
 [CompilerGenerated]
@@ -15,7 +16,9 @@ internal class Program
 {
 	private static int Main(string[] args)
 	{
-		string text = Path.Combine(Path.GetDirectoryName(Environment.ProcessPath) ?? ".", "ghosts.gdb");
+		string exeDir = Path.GetDirectoryName(Environment.ProcessPath) ?? ".";
+		DateOnly today = DateOnly.FromDateTime(DateTime.Now);
+		string text = Path.Combine(exeDir, GhostDb.SeedFileName(today));
 		string? mergeDir = null;
 		bool dbFromFlag = false;
 		int keepD = RunFilter.FilterSettings.Seed.KeepD;
@@ -31,12 +34,16 @@ internal class Program
 			}
 			if (args[i] == "--merge")
 			{
-				if (i + 1 >= args.Length)
+				// Bare --merge defaults to the exe's folder, where the dated
+				// dumps land; --merge <folder> still names the folder.
+				if (i + 1 < args.Length && !args[i + 1].StartsWith("--"))
 				{
-					Console.Error.WriteLine("[ERR] --merge requires a folder argument.");
-					return 1;
+					mergeDir = args[++i];
 				}
-				mergeDir = args[++i];
+				else
+				{
+					mergeDir = exeDir;
+				}
 			}
 			if (args[i] == "--keep-d" && i + 1 < args.Length)
 			{
@@ -73,40 +80,65 @@ internal class Program
 			Console.WriteLine("[..] Mode: merge folder " + mergeDir);
 			if (dbFromFlag)
 			{
-				Console.WriteLine("[..] --db ignored in merge mode; output is " + Path.Combine(mergeDir, GhostDb.MergeFileName));
+				Console.WriteLine("[..] --db ignored in merge mode; output is " + Path.Combine(mergeDir, GhostDb.MergeFileName(today)));
 			}
-			Console.WriteLine("[..] Output: " + Path.Combine(mergeDir, GhostDb.MergeFileName));
+			Console.WriteLine("[..] Output: " + Path.Combine(mergeDir, GhostDb.MergeFileName(today)));
 			Console.WriteLine("[..] Keep window: last " + keepD + " versions" + (keepDFromFlag ? " (flag)" : " (default)"));
 			if (cutBottomFromFlag)
 			{
 				Console.WriteLine("[..] --cut-bottom ignored in merge mode; inputs are already pre-cut.");
 			}
-			return Merger.RunMerge(mergeDir, keepD, Console.Out, Console.Error);
+			return Merger.RunMerge(mergeDir, keepD, Console.Out, Console.Error, today);
 		}
 		Console.WriteLine("[..] Keep window: last " + keepD + " versions" + (keepDFromFlag ? " (flag)" : " (default)"));
 		Console.WriteLine("[..] Cut bottom: " + cutBottom + "%" + (cutBottomFromFlag ? " (flag)" : " (default)"));
 		Console.WriteLine("[..] Output: " + text);
-		bool flag;
-		try
-		{
-			SteamErrMsg pOutErrMsg = default(SteamErrMsg);
-			flag = Steam.SteamAPI_InitFlat(ref pOutErrMsg) == ESteamApiInitResult.Ok;
-			if (!flag)
-			{
-				Console.Error.WriteLine("[ERR] SteamAPI_InitFlat failed: " + pOutErrMsg.Value);
-			}
-		}
-		catch (EntryPointNotFoundException)
-		{
-			flag = Steam.SteamAPI_InitSafe();
-			if (!flag)
-			{
-				Console.Error.WriteLine("[ERR] SteamAPI_InitSafe failed");
-			}
-		}
+		// Steam client lifecycle: if the client is down the seeder starts it
+		// and closes it once the downloads are done — but only a client the
+		// seeder started; a pre-existing one stays open.
+		bool steamStartedByUs = false;
+		bool steamClientShutdown = false;
+		string? steamExe = null;
+		bool flag = TryInitSteam(out string initError);
 		if (!flag)
 		{
-			return 1;
+			Console.Error.WriteLine("[ERR] Steam init failed: " + initError);
+			if (Process.GetProcessesByName("steam").Length > 0)
+			{
+				Console.Error.WriteLine("[ERR] Steam is running but not logged in; log in to Steam and retry.");
+				return 1;
+			}
+			steamExe = FindSteamExe();
+			if (steamExe == null)
+			{
+				Console.Error.WriteLine("[ERR] steam.exe not found in the registry (HKCU/HKLM Software\\Valve\\Steam); start Steam and retry.");
+				return 1;
+			}
+			Console.WriteLine("[..] Steam not running; starting " + steamExe + " ...");
+			try
+			{
+				Process.Start(new ProcessStartInfo { FileName = steamExe, Arguments = "-silent", UseShellExecute = true });
+			}
+			catch (Exception ex)
+			{
+				Console.Error.WriteLine("[ERR] Failed to start Steam: " + ex.Message);
+				return 1;
+			}
+			steamStartedByUs = true;
+			Console.Write("[..] Waiting for the Steam client (up to 90 s) ...");
+			for (int waitedMs = 0; waitedMs < 90000 && !flag; waitedMs += 1000)
+			{
+				Thread.Sleep(1000);
+				flag = TryInitSteam(out _);
+				Console.Write(".");
+			}
+			Console.WriteLine(flag ? " [OK]" : "");
+			if (!flag)
+			{
+				Console.Error.WriteLine("[ERR] Steam did not become ready in 90 s (logged-out auto-login?).");
+				AbandonSteam();
+				return 1;
+			}
 		}
 		nint self = GetAccessor(Steam.SteamAPI_SteamFriends_v018, Steam.SteamAPI_SteamFriends_v017);
 		nint pUserStats = GetAccessor(Steam.SteamAPI_SteamUserStats_v013, Steam.SteamAPI_SteamUserStats_v012);
@@ -115,11 +147,21 @@ internal class Program
 		string text2 = Marshal.PtrToStringUTF8(Steam.SteamAPI_ISteamFriends_GetPersonaName(self)) ?? "?";
 		Console.WriteLine("[OK]  Steam: " + text2);
 		Console.Write("[..] Finding leaderboard 'bpb-runs3' ...");
-		LeaderboardFindResultT leaderboardFindResultT = WaitFor<LeaderboardFindResultT>(Steam.SteamAPI_ISteamUserStats_FindLeaderboard(pUserStats, "bpb-runs3"), 1104);
+		LeaderboardFindResultT leaderboardFindResultT;
+		try
+		{
+			leaderboardFindResultT = WaitFor<LeaderboardFindResultT>(Steam.SteamAPI_ISteamUserStats_FindLeaderboard(pUserStats, "bpb-runs3"), 1104);
+		}
+		catch (Exception ex)
+		{
+			Console.Error.WriteLine("\n[ERR] " + ex.Message);
+			AbandonSteam();
+			return 1;
+		}
 		if (leaderboardFindResultT.m_bLeaderboardFound == 0)
 		{
 			Console.Error.WriteLine("\n[ERR] Leaderboard not found.");
-			Steam.SteamAPI_Shutdown();
+			AbandonSteam();
 			return 1;
 		}
 		ulong lbHandle = leaderboardFindResultT.m_hSteamLeaderboard;
@@ -156,7 +198,9 @@ internal class Program
 					}
 					if (pbFailed)
 					{
-						throw new Exception("Steam I/O failure on leaderboard fetch");
+						Console.Error.WriteLine("\n[ERR] Steam I/O failure on leaderboard fetch.");
+						AbandonSteam();
+						return 1;
 					}
 					nint num5 = Marshal.AllocHGlobal(num3);
 					LeaderboardScoresDownloadedT leaderboardScoresDownloadedT;
@@ -164,7 +208,9 @@ internal class Program
 					{
 						if (!Steam.SteamAPI_ISteamUtils_GetAPICallResult(pUtils, num4, num5, num3, 1105, out pbFailed2))
 						{
-							throw new Exception("GetAPICallResult failed");
+							Console.Error.WriteLine("\n[ERR] GetAPICallResult failed on leaderboard fetch.");
+							AbandonSteam();
+							return 1;
 						}
 						leaderboardScoresDownloadedT = Marshal.PtrToStructure<LeaderboardScoresDownloadedT>(num5);
 					}
@@ -330,6 +376,8 @@ internal class Program
 			Marshal.FreeHGlobal(num7);
 		}
 		Console.WriteLine($"\r[OK]  {dictionary.Count:N0} metadata hits in {stopwatch.Elapsed.TotalSeconds:F1}s.{new string(' ', 30)}");
+		// Downloads are done; Steam is not needed for filtering or writing.
+		AbandonSteam();
 		Console.Write("[..] Filtering ...");
 		List<LeaderboardEntryT> rankOrderedRaw = list
 			.OrderBy(e => e.rank)
@@ -360,8 +408,93 @@ internal class Program
 		});
 		long length = new FileInfo(text).Length;
 		Console.WriteLine($"\r[OK]  {n:N0} rows -> {text} ({(double)length / 1048576.0:F1} MB).{new string(' ', 20)}");
-		Steam.SteamAPI_Shutdown();
 		return 0;
+
+		// One init attempt; a failed attempt releases its resources so the
+		// readiness poll can retry. Tries the newer flat API first, then the
+		// older safe entry point.
+		static bool TryInitSteam(out string error)
+		{
+			try
+			{
+				SteamErrMsg msg = default(SteamErrMsg);
+				if (Steam.SteamAPI_InitFlat(ref msg) == ESteamApiInitResult.Ok)
+				{
+					error = "";
+					return true;
+				}
+				Steam.SteamAPI_Shutdown();
+				error = msg.Value;
+				return false;
+			}
+			catch (EntryPointNotFoundException)
+			{
+				if (Steam.SteamAPI_InitSafe())
+				{
+					error = "";
+					return true;
+				}
+				Steam.SteamAPI_Shutdown();
+				error = "SteamAPI_InitSafe failed";
+				return false;
+			}
+		}
+
+		// Release the Steam API session; if the seeder started the client,
+		// ask that client to exit gracefully exactly once.
+		void AbandonSteam()
+		{
+			Steam.SteamAPI_Shutdown();
+			if (steamStartedByUs && !steamClientShutdown && steamExe != null)
+			{
+				steamClientShutdown = true;
+				Console.WriteLine("[..] Steam was started by the seeder; shutting it down ...");
+				try
+				{
+					Process.Start(new ProcessStartInfo { FileName = steamExe, Arguments = "-shutdown", UseShellExecute = true });
+				}
+				catch (Exception ex)
+				{
+					Console.Error.WriteLine("[WARN] Could not shut Steam down: " + ex.Message);
+				}
+			}
+		}
+
+		// Steam install root from the registry (HKCU first, then the two HKLM
+		// views); SteamPath uses forward slashes on disk.
+		static string? FindSteamExe()
+		{
+			if (!OperatingSystem.IsWindows())
+			{
+				return null;
+			}
+			foreach (string keyName in new[]
+			{
+				@"HKEY_CURRENT_USER\Software\Valve\Steam",
+				@"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Valve\Steam",
+				@"HKEY_LOCAL_MACHINE\Software\Valve\Steam"
+			})
+			{
+				try
+				{
+					if (Registry.GetValue(keyName, "SteamPath", null) is not string steamPath)
+					{
+						continue;
+					}
+					string exe = Path.Combine(steamPath.Replace('/', '\\'), "steam.exe");
+					if (File.Exists(exe))
+					{
+						return exe;
+					}
+				}
+				catch
+				{
+					// Missing key or a non-Windows platform: try the next source.
+				}
+			}
+			return null;
+		}
+
 		static nint GetAccessor(Func<nint> newer, Func<nint> older)
 		{
 			try

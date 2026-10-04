@@ -12,7 +12,11 @@ namespace LeaderboardSeeder;
 // both write through this type so the byte layout stays single-sourced.
 internal static class GhostDb
 {
-	public const string MergeFileName = "ghosts-merged.gdb";
+	// Output names carry the local date, so a folder of scrapes becomes a
+	// history: same-day reruns overwrite (Write is atomic), other days keep.
+	public static string SeedFileName(DateOnly date) => $"ghosts-{date:dd-MM-yy}.gdb";
+
+	public static string MergeFileName(DateOnly date) => $"ghosts-merged-{date:dd-MM-yy}.gdb";
 
 	// Rows are written in the given list order; that order IS dense-rank order
 	// (index i = rank i + 1). Returns the row count written.

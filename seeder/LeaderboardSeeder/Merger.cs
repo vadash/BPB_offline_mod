@@ -47,22 +47,27 @@ internal static class Merger
 		return new MergeResult(kept, reports, filtered.WindowCut);
 	}
 
-	// Folder orchestration: scan top-level *.gdb (a previous merged output
-	// is a valid input; content dedup keeps repeat merges idempotent), fail
-	// the whole merge on any unreadable input, write
-	// <folder>/ghosts-merged.gdb atomically. Returns a process exit code.
-	public static int RunMerge(string folder, int keepD, TextWriter log, TextWriter err)
+	// Folder orchestration: scan top-level *.gdb (older dated merge outputs
+	// are valid inputs; content dedup keeps merges idempotent), fail the
+	// whole merge on any unreadable input, write
+	// <folder>/ghosts-merged-{dd-MM-yy}.gdb atomically. Today's own output
+	// name is excluded from the scan, so a same-day rerun rebuilds from the
+	// other ghost DBs instead of reading (then clobbering) its target.
+	// Returns a process exit code.
+	public static int RunMerge(string folder, int keepD, TextWriter log, TextWriter err, DateOnly? today = null)
 	{
 		if (!Directory.Exists(folder))
 		{
 			err.WriteLine($"[ERR] Folder not found: {folder}");
 			return 1;
 		}
-		string outputPath = Path.Combine(folder, GhostDb.MergeFileName);
+		string outputPath = Path.Combine(folder, GhostDb.MergeFileName(today ?? DateOnly.FromDateTime(DateTime.Now)));
+		string outputFull = Path.GetFullPath(outputPath);
 		List<string> candidates;
 		try
 		{
 			candidates = Directory.EnumerateFiles(folder, "*.gdb", SearchOption.TopDirectoryOnly)
+				.Where(f => !Path.GetFullPath(f).Equals(outputFull, StringComparison.OrdinalIgnoreCase))
 				.OrderBy(f => Path.GetFileName(f), StringComparer.Ordinal)
 				.ToList();
 		}
@@ -70,6 +75,10 @@ internal static class Merger
 		{
 			err.WriteLine($"[ERR] Cannot list {folder}: {ex.Message}");
 			return 1;
+		}
+		if (File.Exists(outputPath))
+		{
+			log.WriteLine($"[..] Excluding today's merge output from inputs: {Path.GetFileName(outputPath)}");
 		}
 		if (candidates.Count < 2)
 		{

@@ -118,14 +118,15 @@ public class RunMergeTests
 	[Fact]
 	public void RunMerge_fails_when_fewer_than_two_dbs()
 	{
+		DateOnly today = new(2026, 1, 10);
 		string dir = TempFolder();
 		GhostDb.Write(new List<Entry> { Row(1, 1, "OCaa") }, Path.Combine(dir, "only.gdb"));
 
-		int code = Merger.RunMerge(dir, keepD: 4, _log, _err);
+		int code = Merger.RunMerge(dir, keepD: 4, _log, _err, today);
 
 		Assert.Equal(1, code);
 		Assert.Contains("at least 2", _err.ToString());
-		Assert.False(File.Exists(Path.Combine(dir, GhostDb.MergeFileName)));
+		Assert.False(File.Exists(Path.Combine(dir, GhostDb.MergeFileName(today))));
 	}
 
 	[Fact]
@@ -137,57 +138,60 @@ public class RunMergeTests
 	}
 
 	[Fact]
-	public void RunMerge_feeds_previous_output_back_and_overwrites()
+	public void RunMerge_same_day_rerun_excludes_existing_output_and_overwrites()
 	{
+		DateOnly today = new(2026, 1, 10);
 		string dir = TempFolder();
 		GhostDb.Write(new List<Entry> { Row(1000, 50.0, "OCaa"), Row(1001, 40.0, "OCbb") }, Path.Combine(dir, "a.gdb"));
 		GhostDb.Write(new List<Entry> { Row(1000, 50.0, "OCaa"), Row(2000, 30.0, "ODcc") }, Path.Combine(dir, "b.gdb"));
+		string output = Path.Combine(dir, "ghosts-merged-10-01-26.gdb");
+		// A garbage same-day output must not poison the rerun: it is the
+		// merge target, excluded from the input scan.
+		File.WriteAllBytes(output, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
 
-		int first = Merger.RunMerge(dir, keepD: 4, _log, _err);
-		Assert.Equal(0, first);
-		string output = Path.Combine(dir, GhostDb.MergeFileName);
+		int code = Merger.RunMerge(dir, keepD: 4, _log, _err, today);
+
+		Assert.Equal(0, code);
 		GhostDb.ReadResult merged = GhostDb.Read(output);
 		Assert.Equal(3, merged.Rows.Count); // 1000 deduped, 1001 + 2000 kept
-
-		// second run: the previous output feeds the union; content dedup
-		// keeps the result stable and the overwrite succeeds
-		int second = Merger.RunMerge(dir, keepD: 4, _log, _err);
-		Assert.Equal(0, second);
-		merged = GhostDb.Read(output);
-		Assert.Equal(3, merged.Rows.Count);
 		Assert.Contains("a.gdb", _log.ToString());
 		Assert.Contains("b.gdb", _log.ToString());
-		Assert.Contains("ghosts-merged.gdb:", _log.ToString());
+		Assert.Contains("Excluding today's merge output", _log.ToString());
 	}
 
 	[Fact]
 	public void RunMerge_merges_previous_output_with_new_dump()
 	{
 		// the user's chain: an older merge result is the only history left,
-		// plus one fresh dump — that folder must merge without renaming
+		// plus one fresh dump — that folder must merge without renaming;
+		// only today's own output name is excluded from the scan
+		DateOnly today = new(2026, 1, 10);
+		DateOnly yesterday = today.AddDays(-1);
 		string dir = TempFolder();
 		GhostDb.Write(new List<Entry> { Row(1000, 50.0, "OCaa"), Row(1001, 40.0, "OCbb") },
-			Path.Combine(dir, GhostDb.MergeFileName));
+			Path.Combine(dir, GhostDb.MergeFileName(yesterday)));
 		GhostDb.Write(new List<Entry> { Row(2000, 30.0, "ODcc") }, Path.Combine(dir, "new.gdb"));
 
-		int code = Merger.RunMerge(dir, keepD: 4, _log, _err);
+		int code = Merger.RunMerge(dir, keepD: 4, _log, _err, today);
 
 		Assert.Equal(0, code);
-		GhostDb.ReadResult merged = GhostDb.Read(Path.Combine(dir, GhostDb.MergeFileName));
+		GhostDb.ReadResult merged = GhostDb.Read(Path.Combine(dir, GhostDb.MergeFileName(today)));
 		Assert.Equal(3, merged.Rows.Count);
+		Assert.Contains("ghosts-merged-09-01-26.gdb", _log.ToString());
 	}
 
 	[Fact]
 	public void RunMerge_fails_whole_merge_on_corrupt_input()
 	{
+		DateOnly today = new(2026, 1, 10);
 		string dir = TempFolder();
 		GhostDb.Write(new List<Entry> { Row(1, 1, "OCaa") }, Path.Combine(dir, "good.gdb"));
 		File.WriteAllBytes(Path.Combine(dir, "bad.gdb"), new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
 
-		int code = Merger.RunMerge(dir, keepD: 4, _log, _err);
+		int code = Merger.RunMerge(dir, keepD: 4, _log, _err, today);
 
 		Assert.Equal(1, code);
 		Assert.Contains("bad.gdb", _err.ToString());
-		Assert.False(File.Exists(Path.Combine(dir, GhostDb.MergeFileName)), "nothing must be written on failure");
+		Assert.False(File.Exists(Path.Combine(dir, GhostDb.MergeFileName(today))), "nothing must be written on failure");
 	}
 }
