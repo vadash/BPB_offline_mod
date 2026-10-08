@@ -7,7 +7,7 @@ using Xunit;
 
 namespace LeaderboardSeeder.Tests;
 
-// Seam: the BGDB v1 file surface (GhostDb.Write / GhostDb.Read), per docs/ghost-db-format.md.
+// Seam: the BGDB v2 file surface (GhostDb.Write / GhostDb.Read), per docs/ghost-db-format.md.
 public class GhostDbTests
 {
 	private static string TempPath(string name)
@@ -110,17 +110,26 @@ public class GhostDbTests
 	[Fact]
 	public void Read_throws_on_wrong_format_version()
 	{
-		// 2 is valid since the summary-carrying v2; 3 is the next unknown.
-		string path = TempPath("badversion");
-		byte[] bytes = new byte[12];
-		bytes[0] = (byte)'B';
-		bytes[1] = (byte)'G';
-		bytes[2] = (byte)'D';
-		bytes[3] = (byte)'B';
-		bytes[4] = 3; // format_version = 3
-		File.WriteAllBytes(path, bytes);
+		// Strict v2: v1 is retired with the summary-carrying layout; 3 is the
+		// next unknown. Both must fail the schema gate itself (the header is
+		// otherwise well-formed and empty, so no later framing guard can
+		// throw in its place).
+		foreach (uint version in new uint[] { 1, 3 })
+		{
+			string path = TempPath("badversion" + version);
+			byte[] bytes = new byte[13];
+			bytes[0] = (byte)'B';
+			bytes[1] = (byte)'G';
+			bytes[2] = (byte)'D';
+			bytes[3] = (byte)'B';
+			bytes[4] = (byte)version; // format_version
+			bytes[8] = 0;             // run_count = 0
+			bytes[12] = 0;            // version_count = 0
+			File.WriteAllBytes(path, bytes);
 
-		Assert.Throws<InvalidDataException>(() => GhostDb.Read(path));
+			InvalidDataException ex = Assert.Throws<InvalidDataException>(() => GhostDb.Read(path));
+			Assert.Contains($"unsupported format_version {version}", ex.Message);
+		}
 	}
 
 	[Fact]
@@ -146,7 +155,7 @@ public class GhostDbTests
 		bytes[1] = (byte)'G';
 		bytes[2] = (byte)'D';
 		bytes[3] = (byte)'B';
-		bytes[4] = 1; // format_version
+		bytes[4] = 2; // format_version
 		bytes[8] = 0x80; // run_count = 0x80000000
 		File.WriteAllBytes(path, bytes);
 
@@ -163,7 +172,7 @@ public class GhostDbTests
 		bytes[1] = (byte)'G';
 		bytes[2] = (byte)'D';
 		bytes[3] = (byte)'B';
-		bytes[4] = 1;  // format_version = 1
+		bytes[4] = 2;  // format_version = 2
 		bytes[8] = 1;  // run_count = 1
 		bytes[12] = 0; // version_count = 0
 		// steam_ids[0] @13..20, blob_offsets[0] @21..28 = 42, d_codes[0] @29, d_order @30..33, r_values @34..41
@@ -214,17 +223,6 @@ public class GhostDbTests
 	}
 
 	[Fact]
-	public void V1_fixture_still_reads_without_summaries()
-	{
-		// Real merged DBs in the wild are v1; the read gate must keep taking them.
-		GhostDb.ReadResult result = GhostDb.Read(Fixture.OutputPath);
-
-		Assert.Equal(1u, result.FormatVersion);
-		Assert.Null(result.Summaries);
-		Assert.Equal(Fixture.PlayerCount, result.Rows.Count);
-	}
-
-	[Fact]
 	public void V2_write_read_round_trip_preserves_rows_and_exposes_summaries()
 	{
 		string d = Header();
@@ -243,8 +241,7 @@ public class GhostDbTests
 		Assert.Equal(0, result.Rejected);
 		Assert.Equal(rows.Select(e => e.SteamId), result.Rows.Select(e => e.SteamId));
 		Assert.Equal(rows.Select(e => e.Metadata), result.Rows.Select(e => e.Metadata));
-		Assert.NotNull(result.Summaries);
-		Assert.Equal(rows.Count, result.Summaries!.Count);
+		Assert.Equal(rows.Count, result.Summaries.Count);
 	}
 
 	[Fact]
@@ -254,7 +251,7 @@ public class GhostDbTests
 		string path = TempPath("v2perfect");
 		GhostDb.Write(new List<Entry> { Row(1, 100.0, d, MetadataWithBoards(1, 100.0, d)) }, path, Book);
 
-		GhostDb.RunSummary summary = GhostDb.Read(path).Summaries!.Single();
+		GhostDb.RunSummary summary = GhostDb.Read(path).Summaries.Single();
 
 		Assert.True(summary.Perfect);
 		Assert.False(summary.Undecodable);
@@ -271,7 +268,7 @@ public class GhostDbTests
 		string path = TempPath("v2beaten");
 		GhostDb.Write(new List<Entry> { Row(1, 100.0, d, MetadataWithBoards(1, 100.0, d)) }, path, Book);
 
-		GhostDb.RunSummary summary = GhostDb.Read(path).Summaries!.Single();
+		GhostDb.RunSummary summary = GhostDb.Read(path).Summaries.Single();
 
 		Assert.False(summary.Perfect);
 		Assert.False(summary.Undecodable);
@@ -286,7 +283,7 @@ public class GhostDbTests
 		string path = TempPath("v2drawn");
 		GhostDb.Write(new List<Entry> { Row(1, 100.0, d, MetadataWithBoards(1, 100.0, d)) }, path, Book);
 
-		Assert.False(GhostDb.Read(path).Summaries!.Single().Perfect);
+		Assert.False(GhostDb.Read(path).Summaries.Single().Perfect);
 	}
 
 	[Fact]
@@ -302,7 +299,7 @@ public class GhostDbTests
 		GhostDb.Write(new List<Entry> { Row(1, 100.0, d, MetadataWithBoards(1, 100.0, d,
 			("0", TestBoards.EncodeRound(Book, TestBoards.NumItems, new TestItem(0, 1, 2, 2, Array.Empty<int>()))))) }, path, Book);
 
-		GhostDb.RunSummary summary = GhostDb.Read(path).Summaries!.Single();
+		GhostDb.RunSummary summary = GhostDb.Read(path).Summaries.Single();
 
 		Assert.Equal(GhostDb.UnknownClass, summary.Class);
 		Assert.False(summary.Perfect);
@@ -316,7 +313,7 @@ public class GhostDbTests
 		string path = TempPath("v2badheader");
 		GhostDb.Write(new List<Entry> { Row(1, 100.0, "~~", MetadataWithBoards(1, 100.0, "~~")) }, path, Book);
 
-		GhostDb.RunSummary summary = GhostDb.Read(path).Summaries!.Single();
+		GhostDb.RunSummary summary = GhostDb.Read(path).Summaries.Single();
 
 		Assert.Equal(GhostDb.UnknownClass, summary.Class);
 		Assert.True(summary.Undecodable);
@@ -332,7 +329,7 @@ public class GhostDbTests
 		string path = TempPath("v2badboard");
 		GhostDb.Write(new List<Entry> { Row(1, 100.0, d, MetadataWithBoards(1, 100.0, d, ("0", "~"), ("7", woodenSword))) }, path, Book);
 
-		GhostDb.RunSummary summary = GhostDb.Read(path).Summaries!.Single();
+		GhostDb.RunSummary summary = GhostDb.Read(path).Summaries.Single();
 
 		Assert.True(summary.Undecodable);
 		Assert.Equal(new[] { TestBoards.WoodenSword }, summary.ItemIndexes);
@@ -346,7 +343,7 @@ public class GhostDbTests
 		string path = TempPath("v2nobards");
 		GhostDb.Write(new List<Entry> { Row(1, 100.0, d, MetadataWithBoards(1, 100.0, d)) }, path, Book);
 
-		GhostDb.RunSummary summary = GhostDb.Read(path).Summaries!.Single();
+		GhostDb.RunSummary summary = GhostDb.Read(path).Summaries.Single();
 
 		Assert.False(summary.Undecodable);
 		Assert.Empty(summary.ItemIndexes);
@@ -364,7 +361,7 @@ public class GhostDbTests
 		string path = TempPath("v2union");
 		GhostDb.Write(new List<Entry> { Row(1, 100.0, d, MetadataWithBoards(1, 100.0, d, ("0", twoSwords), ("17", stone))) }, path, Book);
 
-		Assert.Equal(new[] { 0, TestBoards.WoodenSword }, GhostDb.Read(path).Summaries!.Single().ItemIndexes);
+		Assert.Equal(new[] { 0, TestBoards.WoodenSword }, GhostDb.Read(path).Summaries.Single().ItemIndexes);
 	}
 
 	[Fact]
@@ -374,7 +371,7 @@ public class GhostDbTests
 		string path = TempPath("v2badjson");
 		GhostDb.Write(new List<Entry> { Row(1, 100.0, d, "{not json") }, path, Book);
 
-		GhostDb.RunSummary summary = GhostDb.Read(path).Summaries!.Single();
+		GhostDb.RunSummary summary = GhostDb.Read(path).Summaries.Single();
 
 		Assert.Equal(2, summary.Class);
 		Assert.False(summary.Undecodable);
@@ -391,7 +388,7 @@ public class GhostDbTests
 		string path = TempPath("v2nonstringboard");
 		GhostDb.Write(new List<Entry> { Row(1, 100.0, d, metadata) }, path, Book);
 
-		GhostDb.RunSummary summary = GhostDb.Read(path).Summaries!.Single();
+		GhostDb.RunSummary summary = GhostDb.Read(path).Summaries.Single();
 
 		Assert.True(summary.Undecodable);
 		Assert.Equal(new[] { TestBoards.WoodenSword }, summary.ItemIndexes);

@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 mod\tests\check.ps1
 
 # Run the GhostDb test suite (headless; nonzero exit on any failure or SCRIPT ERROR)
-mod\tests\setup.ps1   # no-op since the BGDB v1 port (no DLLs to stage)
+mod\tests\setup.ps1   # no-op since the BGDB port (no DLLs to stage)
 mod\tests\run.ps1
 
 # Game-level regression check (after every rebuild+deploy): launches the real
@@ -34,23 +34,23 @@ Validation is Godot's `--check-only` script check (`check.ps1`) plus the headles
 
 ## Architecture
 
-Godot 3.6.2 mod that replaces Steam leaderboard I/O with a local ghost database (BGDB v1, newest `*.gdb` next to the game exe — see `docs/ghost-db-format.md`), enabling offline play with custom leaderboards. Ships as a PCK file the game loads as an override.
+Godot 3.6.2 mod that replaces Steam leaderboard I/O with a local ghost database (BGDB v2, newest `*.gdb` next to the game exe — see `docs/ghost-db-format.md`), enabling offline play with custom leaderboards. Ships as a PCK file the game loads as an override.
 
 ### Flow
 
 1. **Game loads mod.pck** — PCK files override `res://` paths, so `Core/SteamWorkshop.gd` replaces the game's original.
 2. **Startup** — Caches paths next to the game exe, picks the ghost DB via `GhostDb.pick_db_path` (newest top-level `*.gdb` by mtime, same-second tie → lexicographically largest name; no candidates → literal `ghosts.gdb`), opens `bbof.log`, defers the download path. The choice is fixed for the session; a same-path replacement is still picked up mid-session.
-3. **Download path** — Opens the picked ghost DB, gates the BGDB v1 header (magic + format_version), reads the current class's anchor from cached state and estimates rank from it, reads a ±1000 opponent window, parses metadata, notifies the game.
+3. **Download path** — Opens the picked ghost DB, gates the BGDB v2 header (magic + format_version), reads the current class's anchor from cached state and estimates rank from it, reads a ±1000 opponent window, parses metadata, notifies the game.
 4. **Zero-parse fallback** — If the primary opponent window parses to zero ghosts, one refill over the global middle-50% window. Game rejects ghosts older than its cutoff.
 5. **Min version probe** — Walks rows oldest-`d` first through the game's parser; first parseable `d` = live cutoff. Persists `min_d` at startup for reference; the seeder no longer consumes it (it keeps the newest `--keep-d` version codes instead).
 
 ### Key files
 
 - `mod.unpacked/Core/SteamWorkshop.gd` — Thin adapter: game contract, paths, sidecar JSON, upload/download orchestration. Logs `contract_access` on any undeclared field get/set (`_get`/`_set` guards).
-- `mod.unpacked/Core/GhostDb.gd` — Deep module owning every ghost-DB read: schema gate, min-d cutoff probe, rank estimate, opponent window, metadata parsing. Zero game references; reads BGDB v1 with plain File seek/read (header + arrays cached per session, blobs read on demand).
-- `mod.unpacked/Core/BoardDecoder.gd` + `BitStream.gd` — Mod-side board decoding for exclusions (ADR 0002, docs/board-format.md). Item facts via the item-data parameter (ItemBook global in production, `item_book_dump.json` in headless tests); never calls the game's decode family. ~98% of rounds decode (game parity); a failed round means "cannot match exclusions".
+- `mod.unpacked/Core/GhostDb.gd` — Deep module owning every ghost-DB read: schema gate, min-d cutoff probe, rank estimate, opponent window, metadata parsing. Zero game references; reads BGDB v2 with plain File seek/read (header + arrays cached per session, blobs read on demand).
+- `mod.unpacked/Core/BoardDecoder.gd` + `BitStream.gd` — Board decoding, kept as the test-time conformance oracle (ADR 0002, docs/board-format.md; ADR 0004 moved exclusion decisions to write-time summaries). In production the decoder only resolves summary item indexes to display names (`item_names_for_indexes`); item facts via the item-data parameter (ItemBook global in production, `item_book_dump.json` in headless tests); never calls the game's decode family. ~98% of rounds decode (game parity); a failed round means "cannot match exclusions".
 - `mod.unpacked/Core/BbofLog.gd` — Compact persistent logger (extracted from the old inner class).
-- `mod/tests/` — Headless harness: `fixture.gd` writes throwaway BGDB v1 files (`docs/ghost-db-format.md`), `run_tests.gd` (SceneTree) holds the suite, `bit_writer.gd` encodes 6-bit round strings (test-side inverse of `Core/BitStream.gd`), `dump_item_data.gd` is the dump-backed item-data double, `fixtures/item_book_dump.json` is the committed ItemBook dump feeding the decode tests, `run.ps1` runs it, `setup.ps1` is a no-op since the port.
+- `mod/tests/` — Headless harness: `fixture.gd` writes throwaway BGDB v2 files (`docs/ghost-db-format.md`), `run_tests.gd` (SceneTree) holds the suite, `bit_writer.gd` encodes 6-bit round strings (test-side inverse of `Core/BitStream.gd`), `dump_item_data.gd` is the dump-backed item-data double, `fixtures/item_book_dump.json` is the committed ItemBook dump feeding the decode tests, `run.ps1` runs it, `setup.ps1` is a no-op since the port.
 - `Pack-ModPck.ps1` — Pure PowerShell PCK packer with real MD5 hashes. Reads header from `mod_1.pck` reference if present, defaults to Godot 3.6.0.
 - `Unpack-ModPck.ps1` — Pure PowerShell PCK unpacker. Parses GDPC binary format, generates `project.godot` + `export_presets.cfg` for rebuilding.
 - `mod.pck` — Packed binary (the deployable artifact).
@@ -62,9 +62,9 @@ The game (`RunDatabase`) touches exactly: fields `gotResponse`, `largestSequence
 
 ### Data files (at runtime, next to game exe)
 
-- `ghosts.gdb` — Ghost database in BGDB v1 (docs/ghost-db-format.md), produced by the seeder: `BGDB` magic + format_version + run_count header, dense-rank arrays (steam_ids, blob_offsets, d_codes, d_order, r_values descending), gzip metadata blobs. At startup the mod loads the newest top-level `*.gdb` next to the exe (any name, merger output included) — no rename step; `ghosts.gdb` is only the fallback name.
+- `ghosts.gdb` — Ghost database in BGDB v2 (docs/ghost-db-format.md), produced by the seeder: `BGDB` magic + format_version + run_count header, dense-rank arrays (steam_ids, blob_offsets, d_codes, d_order, r_values descending), per-run exclusion summaries, gzip metadata blobs. At startup the mod loads the newest top-level `*.gdb` next to the exe (any name, merger output included) — no rename step; `ghosts.gdb` is only the fallback name.
 - `player_state.json` — Player sidecar: `r_by_class` (map of class index → last ranked `r` per class), `anchor_class` + `estimated_rank` (the class the current window center was computed for), `db_row_count`, `sequence_number`, `steam_id`, `min_d`. Unranked runs (`r = -1000`) advance `sequence_number` but never touch `r_by_class`. Legacy scalar-`r` sidecars migrate on load: the stored run's own metadata yields the class.
-- `ghost_filter.json` — Optional user config, hand-edited, re-read at every download: `{"exclude_classes": ["Engineer"], "exclude_items": ["False Life", "Holy Armor"]}`. Names are exact wiki-style display names (matched against `Game.getClassName` and item descriptor names). Missing file = only the default-on `exclude_perfect` rule stays active. OR semantics: a ghost is dropped when its class is listed or any of its boards contains a listed item (whole-run). `"exclude_perfect": true` (boolean, default on — absent file or key still filters) drops ghosts whose first ten round results are all wins, a finished 10-0 run (CONTEXT.md "Perfect ghost"). If filtering leaves fewer than `window/2` ghosts, the opponent window widens (rank half-width doubling) until the pool refills or the whole DB is covered. Every `exclude_items` name is validated against the item data at load; an unknown name warns `filter_unknown_item` in `bbof.log` (typo guard) without blocking the download.
+- `ghost_filter.json` — Optional user config, hand-edited, re-read at every download: `{"exclude_classes": ["Engineer"], "exclude_items": ["False Life", "Holy Armor"]}`. Names are exact wiki-style display names (matched against `Game.getClassName` and item descriptor names). Missing file = only the default-on `exclude_perfect` rule stays active. OR semantics: a ghost is dropped when its class is listed or its Run summary contains a listed item (whole-run). `"exclude_perfect": true` (boolean, default on — absent file or key still filters) drops ghosts whose first ten round results are all wins, a finished 10-0 run (CONTEXT.md "Perfect ghost"). If filtering leaves fewer than `window/2` ghosts, the opponent window widens (rank half-width doubling) until the pool refills or the whole DB is covered. Every `exclude_items` name is validated against the item data at load; an unknown name warns `filter_unknown_item` in `bbof.log` (typo guard) without blocking the download.
 - `item_book_dump.json` — Item-data dump auto-written on every game start (`SteamWorkshop._dump_items`): exact item names, socket counts, scene presence, effects, plus `num_items`/`num_gems`. Feeds the headless board-decode tests (committed copy in `mod/tests/fixtures/`) and doubles as the exact item-name reference for authoring `ghost_filter.json` (ADR 0002).
 - `bbof.log` — Structured log `[HH:MM:SS] LEVEL msg`, 5 MB rotation.
 
@@ -91,4 +91,4 @@ Always use Godot 3.x APIs. The `--script-check` validator uses 3.6.2.
 - Game path: `C:\Games\BackpackBattles\`
 - Game logs: `%APPDATA%\Godot\app_userdata\Backpack Battles\logs\godot.log`
 - Mod logs: `<game_dir>\bbof.log`
-- Native dependencies: none (BGDB v1 reads use plain File I/O; the old gdsqlite GDNative addon is gone).
+- Native dependencies: none (BGDB v2 reads use plain File I/O; the old gdsqlite GDNative addon is gone).

@@ -10,8 +10,8 @@ namespace LeaderboardSeeder;
 
 // BGDB v2 (see docs/ghost-db-format.md): the v1 layout plus a per-run
 // exclusion summary section. The seeder and the merger (seeder --merge) both
-// write through this type so the byte layout stays single-sourced. Read still
-// accepts v1: real merged DBs in the wild are v1.
+// write through this type so the byte layout stays single-sourced. The read
+// gate accepts format_version 2 only; the mod-side reader is equally strict.
 internal static class GhostDb
 {
 	// Header-unreadable runs get no class; mirrors the mod's "cannot match"
@@ -256,15 +256,13 @@ internal static class GhostDb
 	public sealed record ReadResult(
 		IReadOnlyList<Entry> Rows,
 		int Rejected,
-		uint FormatVersion = 1,
-		IReadOnlyList<RunSummary>? Summaries = null);
+		uint FormatVersion,
+		IReadOnlyList<RunSummary> Summaries);
 
 	// Reads rows in dense-rank order (file order). Rows whose metadata lacks a
 	// numeric "r" or a >=2-char "d" are counted in Rejected, mirroring the
 	// seeder's parse-time rejection. Throws InvalidDataException on schema-gate
-	// or framing violations. Accepts format_version 1 and 2; v2 additionally
-	// exposes per-run summaries, indexed by file-row order (row i's summary is
-	// Summaries[row.OrigRank - 1]), null for v1.
+	// or framing violations. Each row's summary is Summaries[row.OrigRank - 1].
 	public static ReadResult Read(string path)
 	{
 		byte[] bytes = File.ReadAllBytes(path);
@@ -273,9 +271,9 @@ internal static class GhostDb
 			throw new InvalidDataException("bad magic (not a BGDB ghost DB).");
 		}
 		uint formatVersion = BitConverter.ToUInt32(bytes, 4);
-		if (formatVersion != 1u && formatVersion != 2u)
+		if (formatVersion != 2u)
 		{
-			throw new InvalidDataException($"unsupported format_version {formatVersion} (expected 1 or 2).");
+			throw new InvalidDataException($"unsupported format_version {formatVersion} (expected 2).");
 		}
 		uint nRaw = BitConverter.ToUInt32(bytes, 8);
 		if (nRaw > (uint)int.MaxValue)
@@ -303,17 +301,13 @@ internal static class GhostDb
 		p += n; // d_codes
 		p += 4 * n; // d_order
 		p += 8 * n; // r_values
-		ulong[]? summaryOffsets = null;
-		if (formatVersion == 2u)
+		if (p + 8L * n > bytes.Length)
 		{
-			if (p + 8L * n > bytes.Length)
-			{
-				throw new InvalidDataException("truncated summary offsets.");
-			}
-			summaryOffsets = new ulong[n];
-			Buffer.BlockCopy(bytes, p, summaryOffsets, 0, 8 * n);
-			p += 8 * n;
+			throw new InvalidDataException("truncated summary offsets.");
 		}
+		ulong[] summaryOffsets = new ulong[n];
+		Buffer.BlockCopy(bytes, p, summaryOffsets, 0, 8 * n);
+		p += 8 * n;
 		List<Entry> rows = new List<Entry>(n);
 		int rejected = 0;
 		for (int i = 0; i < n; i++)
@@ -383,22 +377,18 @@ internal static class GhostDb
 			}
 			rows.Add(new Entry(steamIds[i], i + 1, 0, r, d, metadata));
 		}
-		RunSummary[]? summaries = null;
-		if (summaryOffsets != null)
+		RunSummary[] summaries = new RunSummary[n];
+		for (int i = 0; i < n; i++)
 		{
-			summaries = new RunSummary[n];
-			for (int i = 0; i < n; i++)
+			long offset = (long)summaryOffsets[i];
+			// Records are adjacent; the last ends where the blob section
+			// starts (the first blob's absolute offset).
+			long end = i + 1 < n ? (long)summaryOffsets[i + 1] : (long)blobOffsets[0];
+			if (offset < 0 || offset > bytes.Length || end < offset || end > bytes.Length)
 			{
-				long offset = (long)summaryOffsets[i];
-				// Records are adjacent; the last ends where the blob section
-				// starts (the first blob's absolute offset).
-				long end = i + 1 < n ? (long)summaryOffsets[i + 1] : (long)blobOffsets[0];
-				if (offset < 0 || offset > bytes.Length || end < offset || end > bytes.Length)
-				{
-					throw new InvalidDataException($"summary {i} offset out of range.");
-				}
-				summaries[i] = ParseSummary(bytes, (int)offset, (int)end);
+				throw new InvalidDataException($"summary {i} offset out of range.");
 			}
+			summaries[i] = ParseSummary(bytes, (int)offset, (int)end);
 		}
 		return new ReadResult(rows, rejected, formatVersion, summaries);
 	}

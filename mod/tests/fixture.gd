@@ -1,15 +1,14 @@
 extends Reference
 
-# Writes throwaway ghost DBs in the seeder's BGDB format
+# Writes throwaway ghost DBs in the seeder's BGDB v2 format
 # (docs/ghost-db-format.md): little-endian, dense-rank arrays, gzip metadata
-# blobs. format_version is parameterized because tests exercise both the
-# matching and the mismatching schema gate; v2 additionally writes the
-# per-run summary section (offsets + adjacent records), so reader tests can
-# build v1 and v2 from the same rows. This is test-side emission only — the
-# production writer is the seeder's GhostDb.cs. The row dicts keep the old
+# blobs, per-run summary section (offsets + adjacent records). This is
+# test-side emission only — the production writer is the seeder's GhostDb.cs.
+# Gate-reject legs (wrong format_version) patch the header bytes after a
+# build; the builder itself always writes v2. The row dicts keep the old
 # column-shaped keys; "rank" orders the file (stable sort, mirroring the
 # seeder's dense re-rank 1..N) and is not written; "workshop_id"/"score"/"p"
-# are accepted for shape parity and dropped (ADR 0003). v2 rows may carry
+# are accepted for shape parity and dropped (ADR 0003). Rows may carry
 # opts.summary = {"class": int, "perfect": bool, "undecodable": bool,
 # "items": Array of descriptor indexes}; rows without it get the classless
 # default record (class 255, no flags, no items).
@@ -39,7 +38,7 @@ static func row(steam_id: int, rank: int, metadata: String, opts: Dictionary = {
 		out[key] = opts[key]
 	return out
 
-static func build(path: String, format_version: int, rows: Array) -> bool:
+static func build(path: String, rows: Array) -> bool:
 	var dir = Directory.new()
 	var base = path.get_base_dir()
 	if not dir.dir_exists(base):
@@ -86,21 +85,19 @@ static func build(path: String, format_version: int, rows: Array) -> bool:
 	r_values.sort()
 
 	# Blob section: framing header (comp_len u32, raw_len u32) + gzip stream.
-	# v2 inserts the summary section (u64[N] offsets + adjacent records)
-	# between r_values and the blobs, so the blobs shift by its size.
+	# The summary section (u64[N] offsets + adjacent records) sits between
+	# r_values and the blobs, so the blobs shift by its size.
 	var summary_payloads = []
 	var summary_rel_offsets = []
 	var payload_size = 0
-	if format_version == 2:
-		for r in order:
-			var payload = _encode_summary(r.get("summary", null))
-			summary_rel_offsets.append(payload_size)
-			summary_payloads.append(payload)
-			payload_size += payload.size()
+	for r in order:
+		var payload = _encode_summary(r.get("summary", null))
+		summary_rel_offsets.append(payload_size)
+		summary_payloads.append(payload)
+		payload_size += payload.size()
 	var prefix = 12 + 1 + 2 * codes.size() + 29 * n
-	if format_version == 2:
-		prefix += 8 * n + payload_size
-	# v2: the summary offsets array (8 * n) sits between r_values and the
+	prefix += 8 * n + payload_size
+	# The summary offsets array (8 * n) sits between r_values and the
 	# records, so the records begin at prefix minus the payload size.
 	var record_base = prefix - payload_size
 	var comp_blobs = []
@@ -120,7 +117,7 @@ static func build(path: String, format_version: int, rows: Array) -> bool:
 		push_error("fixture: cannot write " + path)
 		return false
 	f.store_buffer("BGDB".to_ascii())
-	f.store_32(format_version)
+	f.store_32(2) # format_version: the seeder's only output
 	f.store_32(n)
 	f.store_8(codes.size())
 	for code in codes:
@@ -135,11 +132,10 @@ static func build(path: String, format_version: int, rows: Array) -> bool:
 		f.store_32(idx)
 	for i in range(n - 1, -1, -1):
 		f.store_double(r_values[i])
-	if format_version == 2:
-		for off in summary_rel_offsets:
-			f.store_64(record_base + off)
-		for payload in summary_payloads:
-			f.store_buffer(payload)
+	for off in summary_rel_offsets:
+		f.store_64(record_base + off)
+	for payload in summary_payloads:
+		f.store_buffer(payload)
 	for i in range(n):
 		f.store_32(comp_blobs[i][0].size())
 		f.store_32(comp_blobs[i][1])

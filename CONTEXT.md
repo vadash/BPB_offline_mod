@@ -98,6 +98,10 @@ _Avoid_: blacklist, ban, ignore list
 The mod-side pass applying Exclusion rules to the candidate ghosts of one window read. A refill sweep covers only the dense ranks earlier sweeps did not.
 _Avoid_: filter (bare), run filter (that is the seeder's pipeline), exclusion scan
 
+**Run summary**:
+The per-run precomputed exclusion fields stored in the ghost DB: hero class, perfect flag, undecodable marker, and the board item descriptor indexes.
+_Avoid_: filter summary, exclusion cache
+
 **Item data**:
 The per-item facts the board decoder reads: item and gem counts, display names, socket counts, ring effects. Read live from the game's ItemBook in production; headless tests read the committed `item_book_dump.json` copy.
 _Avoid_: item table, item book dump

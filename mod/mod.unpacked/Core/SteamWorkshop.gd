@@ -9,7 +9,7 @@ class_name SteamLeaderboard
 # player_state.json (sidecar, not in DB): per-class ranked ratings
 # (r_by_class), the anchored class + rank estimate, sequence number, min-d
 # cutoff. Download path reads the newest top-level *.gdb next to the game
-# executable (GhostDb.pick_db_path, fixed once at startup; BGDB v1, written
+# executable (GhostDb.pick_db_path, fixed once at startup; BGDB v2, written
 # by the seeder), centered on the current class's anchor.
 # ---------------------------------------------------------------------------
 
@@ -257,69 +257,33 @@ func _load_filter() -> void:
 
 
 # Exclusion filter handed to GhostDb: returns a rule label for runs to drop,
-# "" to keep. v2 runs carry a summary record decoded at read time — every
-# rule decides from it, never from board decode. v1 runs (no summary) take
-# the decode path below, unchanged. Class checks use the game's safe
-# getClassName; item checks use the mod-side BoardDecoder - never the game's
-# decode family, which crashes the process by name (ADR 0002,
+# "" to keep. Every run carries the summary record decoded at read time —
+# every rule decides from it, never from board decode. Class checks use the
+# game's safe getClassName; item checks use the mod-side BoardDecoder - never
+# the game's decode family, which crashes the process by name (ADR 0002,
 # docs/board-format.md).
 func _filter_run(run) -> String:
-	# v2 path: the summary's class 255 is classless (a name that can never
-	# match, so the class rule skips it); perfect comes from the flag; item
-	# indexes resolve to names live through the facts accessor. An
-	# undecodable marker needs no special case — it only means the item set
-	# may be empty/partial, and class/perfect still hold the header values.
+	# The summary's class 255 is classless (a name that can never match, so
+	# the class rule skips it); perfect comes from the flag; item indexes
+	# resolve to names live through the facts accessor. An undecodable marker
+	# needs no special case — it only means the item set may be empty/partial,
+	# and class/perfect still hold the header values.
 	var summary = null
 	if typeof(run) == TYPE_DICTIONARY:
 		summary = run.get("_summary")
 	elif run.has_meta("_summary"):
 		summary = run.get_meta("_summary")
-	if summary != null:
-		var scls = int(summary.get("class", 255))
-		if scls != 255:
-			var scname = Game.getClassName(scls)
-			if scname in _excl_classes:
-				return "class=" + scname
-		if _exclude_perfect and summary.get("perfect", false):
-			return "perfect"
-		if _excl_items.size() > 0:
-			for iname in _decoder.item_names_for_indexes(summary.get("items", []), ItemBook):
-				if iname in _excl_items:
-					return "item=" + iname
-		return ""
-	# 1-arg get only: Object.get takes one argument in Godot 3 (the 2-arg
-	# default form is Dictionary-only and raises a runtime error on the game's
-	# RunData objects, which would silently kill every ghost).
-	var cc = run.get("characterClass")
-	if cc != null:
-		var cname = Game.getClassName(int(cc))
-		if cname in _excl_classes:
-			return "class=" + cname
-	# Perfect ghost (CONTEXT.md): first Game.MAX_WINS round results all wins —
-	# a finished 10-0 run. A draw or loss in the first ten disqualifies; a
-	# missing or short results array means "cannot match" and keeps the run.
-	if _exclude_perfect:
-		var results = run.get("results")
-		if results != null and results.size() >= Game.MAX_WINS:
-			var perfect = true
-			for i in range(Game.MAX_WINS):
-				if int(results[i]) != Game.RoundResult.Win:
-					perfect = false
-					break
-			if perfect:
-				return "perfect"
-	var rounds = run.get("rounds")
-	if rounds != null and _excl_items.size() > 0:
-		var version = str(run.get("entryVersion"))
-		for i in range(rounds.size()):
-			# The ItemBook global is the item-data seam argument (ADR 0002) -
-			# BoardDecoder itself never touches the global.
-			var names = _decoder.decode_item_names(str(rounds[i]), version, ItemBook)
-			if names == null:
-				continue
-			for iname in names:
-				if iname in _excl_items:
-					return "item=" + iname
+	var scls = int(summary.get("class", 255))
+	if scls != 255:
+		var scname = Game.getClassName(scls)
+		if scname in _excl_classes:
+			return "class=" + scname
+	if _exclude_perfect and summary.get("perfect", false):
+		return "perfect"
+	if _excl_items.size() > 0:
+		for iname in _decoder.item_names_for_indexes(summary.get("items", []), ItemBook):
+			if iname in _excl_items:
+				return "item=" + iname
 	return ""
 
 

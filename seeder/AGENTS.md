@@ -16,7 +16,7 @@ dotnet run -c Release -- --merge                  # bare: same, with folder = th
 
 Requires `steam_api64.dll` next to the executable (or discoverable via PATH). If the Steam client is down, the seeder starts it (registry `Software\Valve\Steam\SteamPath`, `-silent`) and waits up to 90 s for login; it shuts the client down after the downloads finish — but only a client it started, never a pre-existing one. Running-but-logged-out is an error. `--merge` needs no Steam and no DLLs.
 
-Tests: `dotnet test LeaderboardSeeder.Tests` (xUnit; round-trips the BGDB layout, merge dedup/filter behavior, and a real-data fixture under `LeaderboardSeeder.Tests/Fixtures/`). Regenerate the fixture explicitly with `BPB_REGENERATE_FIXTURE=1 dotnet test --filter Regenerate_fixture` on the machine that has the source dump.
+Tests: `dotnet test LeaderboardSeeder.Tests` (xUnit; round-trips the BGDB layout, merge dedup/filter behavior, and a real-data fixture under `LeaderboardSeeder.Tests/Fixtures/`). Regenerate the fixture explicitly with `BPB_REGENERATE_FIXTURE=1 dotnet test --filter Regenerate_fixture` (no dump needed: the test re-reads the committed fixture's own rows through the production Read->Write path).
 
 ## Architecture
 
@@ -27,7 +27,7 @@ Single-purpose CLI tool that scrapes the "bpb-runs3" Steam leaderboard, enriches
 1. **Init Steam** — P/Invokes `steam_api64.dll` via `Steam` static class. Tries `SteamAPI_InitFlat` first (newer SDK), falls back to `SteamAPI_InitSafe`. Gracefully handles `EntryPointNotFoundException` for version mismatches. If the client is down, launches `steam.exe -silent` found via registry (`HKCU`/`HKLM` `Software\Valve\Steam\SteamPath`), retries init for up to 90 s, then waits 15 s for the client's web services to settle — a cold client can serve empty leaderboard pages, truncating the fetch.
 2. **Fetch leaderboard** — Finds the leaderboard handle, then downloads entries in 5000-entry batches (4 concurrent requests) via async Steam callback polling (`SteamAPI_RunCallbacks` loop with `Thread.Sleep`).
 3. **Fetch UGC metadata** — For each distinct Workshop ID in the entries, queries UGC details in 1000-item batches (4 concurrent). Extracts metadata JSON strings from each item.
-4. **Filter & write** — Runs the rank-ordered raw entries through `RunFilter` (`LeaderboardSeeder/RunFilter.cs`): `Admit` parses metadata (`r`, `d`), deduplicates by Steam ID (the dedup fires before metadata validation, so a player whose best-rank row has bad or missing metadata is dropped entirely), and rejects rows without a numeric `r`; `Apply` keeps only the newest `--keep-d` (default 4) version codes present in the candidates and drops runs with `r` below the `--min-r` rating floor (default 60; 0 = off). Then writes the `BGDB` v1 binary layout (gzip-compressed metadata blobs, two-pass via `<final>.tmp` + atomic `File.Move`) to `ghosts-{dd-MM-yy}.gdb` next to the exe — local date, so each scrape is one dated file and same-day reruns overwrite; `--db` overrides. Right after the downloads finish (before filtering/writing, which need no Steam), `SteamAPI_Shutdown` runs and a client the seeder started gets `steam.exe -shutdown`; the same cleanup covers mid-download errors.
+4. **Filter & write** — Runs the rank-ordered raw entries through `RunFilter` (`LeaderboardSeeder/RunFilter.cs`): `Admit` parses metadata (`r`, `d`), deduplicates by Steam ID (the dedup fires before metadata validation, so a player whose best-rank row has bad or missing metadata is dropped entirely), and rejects rows without a numeric `r`; `Apply` keeps only the newest `--keep-d` (default 4) version codes present in the candidates and drops runs with `r` below the `--min-r` rating floor (default 60; 0 = off). Then writes the `BGDB` v2 binary layout (gzip-compressed metadata blobs, two-pass via `<final>.tmp` + atomic `File.Move`) to `ghosts-{dd-MM-yy}.gdb` next to the exe — local date, so each scrape is one dated file and same-day reruns overwrite; `--db` overrides. Right after the downloads finish (before filtering/writing, which need no Steam), `SteamAPI_Shutdown` runs and a client the seeder started gets `steam.exe -shutdown`; the same cleanup covers mid-download errors.
 5. **Version report** — Prints per-version kept/cut/total counts after filtering.
 
 ### Merge flow (`--merge [<folder>]`)
@@ -39,7 +39,7 @@ Memory: the merge holds every input fully in RAM (plus the buffered output), so 
 ### Key files
 
 - `Program.cs` — Steam I/O, scrape and merge orchestration, console output. Filtering is delegated to `RunFilter`. Decompiled-style source (top-level statements compiled, then decompiled).
-- `LeaderboardSeeder/GhostDb.cs` — BGDB v1 reader (`GhostDb.Read`) and the single writer (`GhostDb.Write`); seeder and merger both write through it.
+- `LeaderboardSeeder/GhostDb.cs` — BGDB v2 reader (`GhostDb.Read`) and the single writer (`GhostDb.Write`); seeder and merger both write through it.
 - `LeaderboardSeeder/Merger.cs` — Merger: content-based dedup, union filtering via `RunFilter`, folder orchestration (`RunMerge`).
 - `LeaderboardSeeder/Steam.cs` — Flat P/Invoke bindings to `steam_api64.dll`. Uses `nint` for interface pointers. Includes version-paired accessors (`v018`/`v017`, `v013`/`v012`, `v021`/`v018`).
 - `LeaderboardSeeder/Entry.cs` — Record type for a filtered leaderboard row.
@@ -55,4 +55,4 @@ Memory: the merge holds every input fully in RAM (plus the buffered output), so 
 ## Project config
 
 - Target: .NET 10.0, C# 14.0, x64, unsafe blocks enabled
-- Output format: custom `BGDB` v1 binary (`ghosts.gdb`), gzip blobs via `System.IO.Compression.GZipStream`. No external data dependencies. Publishing produces a single-file self-contained exe.
+- Output format: custom `BGDB` v2 binary (`ghosts.gdb`), gzip blobs via `System.IO.Compression.GZipStream`. No external data dependencies. Publishing produces a single-file self-contained exe.

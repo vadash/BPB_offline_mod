@@ -4,12 +4,12 @@ Offline ghost leaderboard for [Backpack Battles](https://store.steampowered.com/
 
 ## Components
 
-- **`seeder/`** — Steam leaderboard seeder. Builds a local ghost database (`ghosts-{dd-MM-yy}.gdb` next to the exe, one dated file per day; BGDB v1 — see [docs/ghost-db-format.md](docs/ghost-db-format.md)). Build with `seeder/build.bat`. Also hosts the **merger**: `LeaderboardSeeder.exe --merge [<folder>]` merges every top-level `*.gdb` in a folder (bare `--merge` = the exe's folder), drops re-seeded identical runs (same player, byte-identical data), keeps runs whose data differs, and writes `ghosts-merged-{dd-MM-yy}.gdb` beside them. No re-filtering by default; `--keep-d`/`--cut-bottom` override.
+- **`seeder/`** — Steam leaderboard seeder. Builds a local ghost database (`ghosts-{dd-MM-yy}.gdb` next to the exe, one dated file per day; BGDB v2 — see [docs/ghost-db-format.md](docs/ghost-db-format.md)). Build with `seeder/build.bat`. Also hosts the **merger**: `LeaderboardSeeder.exe --merge [<folder>]` merges every top-level `*.gdb` in a folder (bare `--merge` = the exe's folder), drops re-seeded identical runs (same player, byte-identical data), keeps runs whose data differs, and writes `ghosts-merged-{dd-MM-yy}.gdb` beside them. No re-filtering by default; `--keep-d`/`--cut-bottom` override.
 - **`mod/`** — Game mod. Replaces the game's Steam leaderboard I/O with the newest local ghost database (`*.gdb`) next to the game exe; ships as a `mod.pck` override. Pack with `mod/Pack-ModPck.ps1`, deploy by copying `mod.pck` next to the game exe. See [mod/AGENTS.md](mod/AGENTS.md) for build, deploy, and validation steps.
 
 ## Documentation
 
-- [docs/ghost-db-format.md](docs/ghost-db-format.md) — ghost database format (BGDB v1)
+- [docs/ghost-db-format.md](docs/ghost-db-format.md) — ghost database format (BGDB v2)
 - [docs/board-format.md](docs/board-format.md) — board encoding used for ghost exclusions
 - [docs/adr/](docs/adr/) — architecture decision records
 

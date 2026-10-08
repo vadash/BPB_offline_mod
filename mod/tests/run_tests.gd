@@ -62,11 +62,9 @@ func _initialize() -> void:
 	test_pick_db()
 	test_filter_exclusions()
 	test_refill()
-	test_refill_v2_parity()
 	test_class_anchor()
 	test_golden_db()
 	test_golden_sweep()
-	test_golden_sweep_v2()
 	test_decode_item_names()
 	test_decode_golden_smoke()
 	test_bitstream_port()
@@ -206,25 +204,37 @@ func _touch(path: String) -> void:
 	f.store_8(0)
 	f.close()
 
+# Rewrites the format_version u32 of a built DB: gate-reject legs need
+# mismatching files the v2-only builder never produces.
+func _patch_version(path: String, version: int) -> void:
+	var f = File.new()
+	f.open(path, File.READ_WRITE)
+	f.seek(4)
+	f.store_32(version)
+	f.close()
+
 # --- tests ------------------------------------------------------------------
 
 # 1. Schema gate: a BGDB file whose format_version does not match is rejected
-# with the old fail_load string; an unreadable header gates as "unknown".
+# with the old fail_load string. Strict v2: v0 and the retired v1 both fail;
+# an unreadable header gates as "unknown".
 func test_schema_gate() -> void:
 	print("[TEST] schema gate (format_version mismatch, garbage header)")
-	var db_path = user_path("gate.db")
-	FIXTURE.build(db_path, 0, [])
-	var g = make_ghost(db_path, user_path("gate.log"))
-	var res = g.db.load_ghosts({
-		"player_r": null,
-		"estimated_rank": -1,
-		"db_row_count": 0,
-		"player_id": 0,
-		"window": 100,
-	})
-	eq(res.get("ok", "(missing)"), false, "format_version=0 rejected: ok=false")
-	eq(res.get("reason", "(missing)"), "db_schema_version ver=0 expected=1",
-		"reason is the old fail_load string")
+	for ver in [0, 1]:
+		var db_path = user_path("gate_%d.db" % ver)
+		FIXTURE.build(db_path, [])
+		_patch_version(db_path, ver)
+		var g = make_ghost(db_path, user_path("gate_%d.log" % ver))
+		var res = g.db.load_ghosts({
+			"player_r": null,
+			"estimated_rank": -1,
+			"db_row_count": 0,
+			"player_id": 0,
+			"window": 100,
+		})
+		eq(res.get("ok", "(missing)"), false, "format_version=%d rejected: ok=false" % ver)
+		eq(res.get("reason", "(missing)"), "db_schema_version ver=%d expected=2" % ver,
+			"reason is the old fail_load string")
 	var bad_path = user_path("gate_short.bin")
 	var fw = File.new()
 	fw.open(bad_path, File.WRITE)
@@ -235,13 +245,13 @@ func test_schema_gate() -> void:
 		"player_r": null, "estimated_rank": -1, "db_row_count": 0,
 		"player_id": 0, "window": 100,
 	})
-	eq(res2.get("reason", "(missing)"), "db_schema_version ver=unknown expected=1",
+	eq(res2.get("reason", "(missing)"), "db_schema_version ver=unknown expected=2",
 		"header too short reports ver=unknown")
 
-	# The seeder writes v2 (per-run exclusion summaries): the gate accepts it
-	# like v1, so a seeder-replaced DB never fails the load.
+	# The seeder writes v2 (per-run exclusion summaries): the gate takes
+	# exactly that, so a seeder-replaced DB never fails the load.
 	var v2_path = user_path("gate_v2.db")
-	FIXTURE.build(v2_path, 2, [])
+	FIXTURE.build(v2_path, [])
 	var g3 = make_ghost(v2_path, user_path("gate_v2.log"))
 	var res3 = g3.db.load_ghosts({
 		"player_r": null, "estimated_rank": -1, "db_row_count": 0,
@@ -254,7 +264,7 @@ func test_schema_gate() -> void:
 func test_probe_min_d() -> void:
 	print("[TEST] min-d cutoff probe (first parseable d wins)")
 	var db_path = user_path("probe.db")
-	FIXTURE.build(db_path, 1, [
+	FIXTURE.build(db_path, [
 		FIXTURE.row(101, 1, "{bad", {"d": "aa"}),
 		FIXTURE.row(102, 2, '{"score":9}', {"d": "xyzw"}),
 		FIXTURE.row(103, 3, '{"score":1}', {"d": "zz"}),
@@ -275,7 +285,7 @@ func test_probe_min_d() -> void:
 func test_window() -> void:
 	print("[TEST] opponent window (clamp, self exclusion, length filter)")
 	var db_path = user_path("window.db")
-	FIXTURE.build(db_path, 1, [
+	FIXTURE.build(db_path, [
 		FIXTURE.row(1, 2, '{"score":5,"me":1}', {"r": 5.0}),
 		FIXTURE.row(101, 1, "x"),
 		FIXTURE.row(102, 3, '{"score":1}'),
@@ -309,7 +319,7 @@ func test_zero_parse_fallback() -> void:
 	rows.append(FIXTURE.row(102, 2, '{"nope":20}'))
 	for rank in range(3, 12):
 		rows.append(FIXTURE.row(100 + rank, rank, '{"score":%d}' % rank))
-	FIXTURE.build(db_path, 1, rows)
+	FIXTURE.build(db_path, rows)
 	var g = make_ghost(db_path, user_path("fallback.log"))
 	var res = g.db.load_ghosts({
 		"player_r": 5.0, "estimated_rank": 5, "db_row_count": 12,
@@ -327,12 +337,12 @@ func test_zero_parse_fallback() -> void:
 func test_estimate_rank() -> void:
 	print("[TEST] rank estimate (ordering, empty DB)")
 	var empty_path = user_path("empty.db")
-	FIXTURE.build(empty_path, 1, [])
+	FIXTURE.build(empty_path, [])
 	var ge = make_ghost(empty_path, user_path("empty.log"))
 	eq(ge.db.estimate_rank(100.0), -1, "empty DB estimates -1")
 	eq(ge.db.row_count(), 0, "empty DB row count is 0")
 	var db_path = user_path("estimate.db")
-	FIXTURE.build(db_path, 1, [
+	FIXTURE.build(db_path, [
 		FIXTURE.row(201, 1, '{"score":1}', {"r": 1.0}),
 		FIXTURE.row(202, 2, '{"score":2}', {"r": 2.0}),
 		FIXTURE.row(203, 3, '{"score":3}', {"r": 3.0}),
@@ -407,7 +417,7 @@ func test_filter_exclusions() -> void:
 	var rows = []
 	for rank in range(1, 7):
 		rows.append(FIXTURE.row(100 + rank, rank, '{"score":%d,"id":%d}' % [rank, rank]))
-	FIXTURE.build(db_path, 1, rows)
+	FIXTURE.build(db_path, rows)
 	var g = make_ghost(db_path, user_path("filter.log"))
 	var res = g.db.load_ghosts({
 		"player_r": 3.0, "estimated_rank": 3, "db_row_count": 6,
@@ -445,7 +455,7 @@ func test_refill() -> void:
 	var rows = []
 	for rank in range(1, 2501):
 		rows.append(FIXTURE.row(100000 + rank, rank, '{"score":%d,"id":%d}' % [rank, rank]))
-	FIXTURE.build(db_path, 1, rows)
+	FIXTURE.build(db_path, rows)
 	var g = make_ghost(db_path, user_path("refill.log"))
 	var res = g.db.load_ghosts({
 		"player_r": 1250.0, "estimated_rank": 1250, "db_row_count": 2500,
@@ -474,74 +484,14 @@ func test_refill() -> void:
 	eq(int(res.get("runs")[298]["id"]), 350, "right slab follows the left slab")
 	_fake_filter_kills = {}
 
-# Refill parity across formats: the same 2500 rows built as v1 and as v2
-# (v2 rows carry classless default summaries) must produce identical
-# sweeps — same slab counters, same log fragments, byte-identical pool
-# (ids and r values in order).
-func _refill_load(db_path: String, log_path: String) -> Dictionary:
-	var g = make_ghost(db_path, log_path)
-	return g.db.load_ghosts({
-		"player_r": 1250.0, "estimated_rank": 1250, "db_row_count": 2500,
-		"window": 100, "player_id": 1,
-		"filter_fn": funcref(self, "fake_filter"),
-	})
-
-# Shared assertion block for one refill run; returns [ids, r_values].
-func _refill_assert(res: Dictionary, log_path: String, tag: String) -> Array:
-	var ids = []
-	var rs = []
-	var uniq = {}
-	for run in res.get("runs"):
-		var rid = int(run["id"])
-		ids.append(rid)
-		rs.append(float(run["r"]))
-		uniq[rid] = true
-	eq(ids.size(), 2200, tag + ": refill recovers every non-excluded ghost")
-	eq(uniq.size(), ids.size(), tag + ": refill dedupes every id")
-	ok(not uniq.has(299) and not uniq.has(349), tag + ": primary-window killed ids absent")
-	ok(not uniq.has(2201) and not uniq.has(2449), tag + ": far killed ids absent")
-	ok(uniq.has(1) and uniq.has(250) and uniq.has(298) and uniq.has(350)
-		and uniq.has(2450) and uniq.has(2500),
-		tag + ": survivors at every refill boundary present")
-	var text = log_text(log_path)
-	ok(text.find("filter kept=49 filtered=51") != -1, tag + ": primary filter counts the gutted window")
-	ok(text.find("refill half=2000 lo=1 hi=3250") != -1, tag + ": refill doubles half to cover the whole DB")
-	eq(res.get("json_ok"), 2500, tag + ": slab refill reads every row exactly once")
-	ok(text.find("filter kept=249 filtered=0") != -1, tag + ": left slab sweeps ranks 1..249 with no kills")
-	ok(text.find("filter kept=1902 filtered=249") != -1, tag + ": right slab sweeps ranks 350..2500")
-	eq(ids[0], 250, tag + ": pool opens with the primary-window survivors")
-	eq(ids[49], 1, tag + ": left slab follows the primary survivors")
-	eq(ids[298], 350, tag + ": right slab follows the left slab")
-	return [ids, rs]
-
-func test_refill_v2_parity() -> void:
-	print("[TEST] refill parity (v1 vs v2 build, identical pools and logs)")
-	_fake_filter_kills = {}
-	for id in range(299, 350):
-		_fake_filter_kills[id] = "class=Engineer"
-	for id in range(2201, 2450):
-		_fake_filter_kills[id] = "item=Boot"
-	var rows = []
-	for rank in range(1, 2501):
-		rows.append(FIXTURE.row(100000 + rank, rank,
-			'{"score":%d,"id":%d,"r":%d}' % [rank, rank, rank], {"r": float(rank)}))
-	var v1_path = user_path("refill_v1.db")
-	FIXTURE.build(v1_path, 1, rows)
-	var v2_path = user_path("refill_v2.db")
-	FIXTURE.build(v2_path, 2, rows)
-	var res1 = _refill_load(v1_path, user_path("refill_v1.log"))
-	var res2 = _refill_load(v2_path, user_path("refill_v2.log"))
-	var p1 = _refill_assert(res1, user_path("refill_v1.log"), "v1")
-	var p2 = _refill_assert(res2, user_path("refill_v2.log"), "v2")
-	eq(p2[0], p1[0], "v2 pool ids identical to the v1 run, same order")
-	eq(p2[1], p1[1], "v2 pool r values identical to the v1 run")
-	_fake_filter_kills = {}
-
 # 7b. Exclusion sweep pin: the full golden DB through load_ghosts with no
 # exclusions - the byte-identical pool contract of the load rework (slab
-# refill, char-wise BitStream, item-fact index), pinned in dense order.
+# refill, char-wise BitStream, item-fact index), pinned in dense order. The
+# golden is v2, so every row also carries its summary record: the class
+# histogram, undecodable/perfect counts and highest item index are pinned
+# from the committed seeder-written bytes, independent of this reader.
 func test_golden_sweep() -> void:
-	print("[TEST] golden sweep pin (full-DB survivors, dense order)")
+	print("[TEST] golden sweep pin (full-DB survivors, dense order, summaries)")
 	var golden_path = ProjectSettings.globalize_path("res://").plus_file("../../seeder/LeaderboardSeeder.Tests/Fixtures/ghosts-fixture-64.gdb")
 	if not File.new().file_exists(golden_path):
 		# The file is committed; absence is a broken checkout, never a skip.
@@ -555,8 +505,25 @@ func test_golden_sweep() -> void:
 	eq(res.get("ok"), true, "golden DB loads")
 	eq(res.get("runs").size(), 64, "every dense row survives an empty exclusion set")
 	var rs = []
+	var carried = 0
+	var undecodable = 0
+	var perfects = 0
+	var max_item = 0
+	var hist = {}
 	for run in res.get("runs"):
 		rs.append(float(run["r"]))
+		var summary = run.get("_summary")
+		if summary == null:
+			continue
+		carried += 1
+		if summary["undecodable"]:
+			undecodable += 1
+		if summary["perfect"]:
+			perfects += 1
+		var cls = int(summary["class"])
+		hist[cls] = int(hist.get(cls, 0)) + 1
+		for idx in summary["items"]:
+			max_item = max(max_item, int(idx))
 	eq(rs, [
 		342.884159, 266.646171, 270.231926, 273.436809, 361.948541, 251.998941,
 		81.898431, 327.265398, 94.382271, 245.192354, 60.118407, 86.044547,
@@ -570,65 +537,11 @@ func test_golden_sweep() -> void:
 		108.398895, 82.229489, 294.989475, 147.536184, 223.421581, 185.625563,
 		320.540372, 321.386477, 261.259897, 311.297876,
 	], "survivor set and dense order pinned")
-
-# Sweep pin on the committed v2 fixture: same 64 rows as the v1 golden DB
-# plus per-row summary records. The v2 reader must produce the identical
-# dense-order survivor pool while carrying each row's summary on the run —
-# the sweep decisions for those summaries are slice 2.
-func test_golden_sweep_v2() -> void:
-	print("[TEST] golden sweep pin v2 (summary read, v1 pool parity)")
-	var fixtures = ProjectSettings.globalize_path("res://").plus_file("../../seeder/LeaderboardSeeder.Tests/Fixtures/")
-	var v1_path = fixtures.plus_file("ghosts-fixture-64.gdb")
-	var v2_path = fixtures.plus_file("ghosts-fixture-64-v2.gdb")
-	if not File.new().file_exists(v1_path) or not File.new().file_exists(v2_path):
-		# Committed files; absence is a broken checkout, never a skip.
-		ok(false, "committed fixture missing: " + v2_path)
-		return
-	var state = {
-		"player_r": 270.231926, "estimated_rank": 32, "db_row_count": 64,
-		"player_id": 1, "window": 64,
-	}
-	var g1 = make_ghost(v1_path, user_path("sweep_v1.log"), funcref(self, "golden_parse"))
-	var r1 = g1.db.load_ghosts(state)
-	var g2 = make_ghost(v2_path, user_path("sweep_v2.log"), funcref(self, "golden_parse"))
-	var r2 = g2.db.load_ghosts(state)
-	eq(r2.get("ok"), true, "v2 DB passes the schema gate")
-	eq(r2.get("runs").size(), 64, "every dense row survives an empty exclusion set")
-	var rs1 = []
-	var rs2 = []
-	for run in r1.get("runs"):
-		rs1.append(float(run["r"]))
-	var carried = 0
-	var undecodable = 0
-	var perfects = 0
-	var max_item = 0
-	var hist = {}
-	for run in r2.get("runs"):
-		rs2.append(float(run["r"]))
-		var summary = run.get("_summary")
-		if summary == null:
-			continue
-		carried += 1
-		if summary["undecodable"]:
-			undecodable += 1
-		if summary["perfect"]:
-			perfects += 1
-		var cls = int(summary["class"])
-		hist[cls] = int(hist.get(cls, 0)) + 1
-		for idx in summary["items"]:
-			max_item = max(max_item, int(idx))
-	eq(rs2, rs1, "v2 survivor pool identical to the v1 pin, dense order")
-	eq(carried, 64, "every v2 run carries a summary payload")
-	var v1_carried = 0
-	for run in r1.get("runs"):
-		if run.get("_summary") != null:
-			v1_carried += 1
-	eq(v1_carried, 0, "v1 runs carry no summary payload")
-	# Pins from the committed seeder-written bytes (independent of this
-	# reader): every row's header decodes to a class (none classless), the
-	# class histogram, three rows with a failed board (undecodable marker,
-	# header class kept), no perfect ghost, and the gap-encoded item sets
-	# reaching the highest descriptor index (519 items).
+	eq(carried, 64, "every run carries a summary payload")
+	# Pins from the committed seeder-written bytes: every row's header
+	# decodes to a class (none classless), three rows have a failed board
+	# (undecodable marker, header class kept), no perfect ghost, and the
+	# gap-encoded item sets reach the highest descriptor index (519 items).
 	var keys = hist.keys()
 	keys.sort()
 	var parts = []
@@ -649,7 +562,7 @@ func test_class_anchor() -> void:
 	var rows = []
 	for rank in range(1, 11):
 		rows.append(FIXTURE.row(1000 + rank, rank, '{"score":%d}' % rank, {"r": 11.0 - rank}))
-	FIXTURE.build(db_path, 1, rows)
+	FIXTURE.build(db_path, rows)
 	var g = make_ghost(db_path, user_path("anchor.log"))
 	# Sidecar: class 0 uploaded at r=5.0 (rank 6), DB unchanged since.
 	var res = g.db.load_ghosts({
@@ -899,16 +812,14 @@ func test_filter_unknown_item_warn() -> void:
 
 # exclude_perfect: default on (absent file or key), boolean opt-out, and a
 # non-bool value disables the whole filter — same one-warn convention as the
-# string lists. _filter_run reads RunData.results: first Game.MAX_WINS
-# entries all Win = perfect ghost (finished 10-0); anything else stays.
+# string lists. _filter_run reads the summary record: the seeder precomputed
+# the perfect flag from the header results, so a classless undecodable run
+# (missing/short header) cannot match and stays.
 func test_filter_perfect_flag() -> void:
 	print("[TEST] filter exclude_perfect (default on, opt-out, malformation)")
-	var perfect = {"characterClass": 0,
-		"results": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 3, 3, 3, 3]}
-	var beaten = {"characterClass": 0,
-		"results": [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 3, 3, 3, 3, 3, 3, 3, 3]}
-	var drawn = {"characterClass": 0,
-		"results": [0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 3, 3, 3, 3, 3, 3, 3]}
+	var perfect = {"_summary": {"class": 0, "perfect": true, "undecodable": false, "items": []}}
+	var beaten = {"_summary": {"class": 0, "perfect": false, "undecodable": false, "items": []}}
+	var classless = {"_summary": {"class": 255, "perfect": false, "undecodable": true, "items": []}}
 
 	var sw = SteamWorkshopScript.new()
 	var log_path = user_path("filter_perfect.log")
@@ -926,11 +837,9 @@ func test_filter_perfect_flag() -> void:
 		dir.remove(sw._filter_path)
 	sw._load_filter()
 	eq(sw._exclude_perfect, true, "missing file keeps default on")
-	eq(sw._filter_run(perfect), "perfect", "10-0 ghost drops by default")
-	eq(sw._filter_run(beaten), "", "10-1 ghost stays")
-	eq(sw._filter_run(drawn), "", "draw in the first ten is not perfect")
-	eq(sw._filter_run({"characterClass": 0}), "", "no results array stays (cannot match)")
-	eq(sw._filter_run({"characterClass": 0, "results": [0, 0, 0]}), "", "short results array stays")
+	eq(sw._filter_run(perfect), "perfect", "perfect-flagged ghost drops by default")
+	eq(sw._filter_run(beaten), "", "beaten ghost stays")
+	eq(sw._filter_run(classless), "", "classless undecodable ghost stays (cannot match)")
 
 	var f = File.new()
 	f.open(sw._filter_path, File.WRITE)
@@ -988,7 +897,7 @@ func test_filter_summary_v2() -> void:
 				6: {"class": 0, "perfect": false, "undecodable": false, "items": [390, 505]},
 			}.get(rank),
 		}))
-	FIXTURE.build(db_path, 2, rows)
+	FIXTURE.build(db_path, rows)
 
 	# Real adapter, real decoder behind the spy, stubbed ItemBook global.
 	var sw = SteamWorkshopScript.new()
@@ -1119,7 +1028,7 @@ func test_push_anchor() -> void:
 	var rows = []
 	for rank in range(1, 4):
 		rows.append(FIXTURE.row(1000 + rank, rank, '{"score":%d}' % rank, {"r": 11.0 - rank}))
-	FIXTURE.build(db_path, 1, rows)
+	FIXTURE.build(db_path, rows)
 	var sw = SteamWorkshopScript.new()
 	var log_path = user_path("push_anchor.log")
 	var dir = Directory.new()

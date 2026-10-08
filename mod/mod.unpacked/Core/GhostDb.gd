@@ -5,7 +5,7 @@ extends Reference
 # probe, rank estimate, opponent window, and metadata parsing.
 # Knows nothing about the game: the score parser is injected as a FuncRef by
 # the adapter (wrapping RunDatabase.parseSingleScore). Reads the seeder's
-# BGDB v1 file (docs/ghost-db-format.md) with plain File seek/read only. The
+# BGDB v2 file (docs/ghost-db-format.md) with plain File seek/read only. The
 # header + dense-rank arrays are cached lazily per instance (the adapter
 # holds one GhostDb for the session); the cache reloads when the file's
 # mtime changes, so a seeder-replaced DB is picked up mid-session. Which
@@ -18,11 +18,10 @@ extends Reference
 # ---------------------------------------------------------------------------
 
 const MAGIC = "BGDB"
-const FORMAT_VERSION = 1
-# The seeder writes v2 (adds per-row exclusion summaries after the v1
-# arrays); v1 DBs in the wild stay readable. FORMAT_VERSION stays the base
-# version the gate-fail string has always reported.
-const FORMAT_VERSIONS = [1, 2]
+# The seeder writes v2: the base layout plus per-row exclusion summaries
+# after the dense-rank arrays. v1 DBs fail the gate (clean cutover); the
+# gate-fail string reports this version as the expected one.
+const FORMAT_VERSION = 2
 
 # Probe cap: runs examined oldest-d first before giving up (the old SQL
 # LIMIT 200 on the probe query).
@@ -315,8 +314,8 @@ func _refresh_cache() -> String:
 		_ver = str(ver)
 		if magic == MAGIC:
 			_n = f.get_32()
-			if ver in FORMAT_VERSIONS:
-				_read_arrays(f, ver)
+			if ver == FORMAT_VERSION:
+				_read_arrays(f)
 				_gate_ok = true
 	f.close()
 	if _gate_ok:
@@ -327,12 +326,12 @@ func _refresh_cache() -> String:
 
 
 # Section order (docs/ghost-db-format.md): version table, steam_ids,
-# blob_offsets, d_codes, d_order, r_values — then, v2 only, summary_offsets
+# blob_offsets, d_codes, d_order, r_values, then summary_offsets
 # (u64[N], file row i's summary record is at summary_offsets[i]). Integer
 # arrays use GDScript's 64-bit int via plain Array (PoolRealArray is f32 and
 # corrupts u64s and offsets above 2^24; PoolIntArray covers the u32 d_order
 # exactly).
-func _read_arrays(f, ver: int) -> void:
+func _read_arrays(f) -> void:
 	var vcount = f.get_8()
 	var vbytes = f.get_buffer(2 * vcount)
 	_version_codes = PoolStringArray()
@@ -357,10 +356,9 @@ func _read_arrays(f, ver: int) -> void:
 	for i in range(_n):
 		_r_values[i] = f.get_double()
 	_summary_offsets = []
-	if ver == 2:
-		_summary_offsets.resize(_n)
-		for i in range(_n):
-			_summary_offsets[i] = f.get_64()
+	_summary_offsets.resize(_n)
+	for i in range(_n):
+		_summary_offsets[i] = f.get_64()
 
 
 # v2 summary record for file row i (dense rank i+1): u8 class (255 =
@@ -493,7 +491,6 @@ func _window_rows(lo: int, hi: int, player_id: int, limit: int) -> Dictionary:
 	var f = File.new()
 	if f.open(_db_path, File.READ) != OK:
 		return {"rows": rows, "summaries": summaries, "lo": 0, "hi": 0}
-	var is_v2 = _summary_offsets.size() > 0
 	for i in range(lo_i, hi_i + 1):
 		swept_hi = i + 1
 		if player_id != -1 and int(_steam_ids[i]) == player_id:
@@ -504,8 +501,8 @@ func _window_rows(lo: int, hi: int, player_id: int, limit: int) -> Dictionary:
 		if raw_len <= 10:
 			continue
 		rows.push_back(_blob_string(f, comp_len, raw_len))
-		# v2: the summary record rides along, same array slot as its row.
-		summaries.push_back(_read_summary(f, i) if is_v2 else null)
+		# The summary record rides along, same array slot as its row.
+		summaries.push_back(_read_summary(f, i))
 		if rows.size() >= limit:
 			break
 	f.close()
@@ -557,11 +554,12 @@ func _apply_filter(runs: Array, filter_fn) -> Array:
 	return kept
 
 
-# Parse metadata strings through the injected game parser. Returns the
-# parser's own results (plain dictionaries in tests, game run objects in the
-# mod) plus the json/parse counters and its own ms — same keys, same slicing,
-# same failure counting as before the split.
-func _parse_rows(rows: Array, summaries = null) -> Dictionary:
+# Parse metadata strings through the injected game parser. summaries rides
+# in from _window_rows (same slot per row). Returns the parser's own results
+# (plain dictionaries in tests, game run objects in the mod) plus the
+# json/parse counters and its own ms — same keys, same slicing, same failure
+# counting as before the split.
+func _parse_rows(rows: Array, summaries: Array) -> Dictionary:
 	var t0 = OS.get_ticks_usec()
 	var json_ok = 0
 	var parse_ok = 0
@@ -575,14 +573,13 @@ func _parse_rows(rows: Array, summaries = null) -> Dictionary:
 			dict["ugc"] = 1
 			var runData = _parse_fn.call_func(dict)
 			if runData:
-				if summaries != null and ri < summaries.size() and summaries[ri] != null:
-					# v2: the summary rides the parsed run — dictionaries
-					# take the key, game RunData objects take an Object meta
-					# (they have no such declared member to set).
-					if typeof(runData) == TYPE_DICTIONARY:
-						runData["_summary"] = summaries[ri]
-					else:
-						runData.set_meta("_summary", summaries[ri])
+				# The summary rides the parsed run — dictionaries take the
+				# key, game RunData objects take an Object meta (they have
+				# no such declared member to set).
+				if typeof(runData) == TYPE_DICTIONARY:
+					runData["_summary"] = summaries[ri]
+				else:
+					runData.set_meta("_summary", summaries[ri])
 				runs.push_back(runData)
 				parse_ok += 1
 			elif parse_ok == 0 and json_ok <= 3:
