@@ -94,6 +94,10 @@ _Avoid_: non-Steam copy
 A user rule that stops ghosts from loading: an excluded hero class, an excluded item on any board, or perfect-ghost status. Rules combine with OR.
 _Avoid_: blacklist, ban, ignore list
 
+**Exclusion sweep**:
+The mod-side pass applying Exclusion rules to the candidate ghosts of one window read. A refill sweep covers only the dense ranks earlier sweeps did not.
+_Avoid_: filter (bare), run filter (that is the seeder's pipeline), exclusion scan
+
 **Item data**:
 The per-item facts the board decoder reads: item and gem counts, display names, socket counts, ring effects. Read live from the game's ItemBook in production; headless tests read the committed `item_book_dump.json` copy.
 _Avoid_: item table, item book dump

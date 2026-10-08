@@ -24,41 +24,91 @@ const INVENTORY_Y = 10
 const LEGACY_NUM_ITEMS = 510
 
 
+# Per-item-data fact index the exclusion sweep reuses across decodes: name,
+# socket count, decode validity and Magic Ring effect count per index, built
+# once per item_data object (keyed by identity — a different double builds
+# its own entry). Without it every board decode re-consults the item data
+# for every item instance, and one load decodes thousands of boards.
+var _facts_cache: Dictionary = {}
+
+
+func _facts(item_data) -> Dictionary:
+	var cached = _facts_cache.get(item_data)
+	if cached != null:
+		return cached
+	var num_items = int(item_data.getNumItems())
+	var valid: Array = []
+	var names: Array = []
+	var sockets: Array = []
+	var effects: Array = []
+	valid.resize(num_items)
+	names.resize(num_items)
+	sockets.resize(num_items)
+	effects.resize(num_items)
+	for i in range(num_items):
+		var d = item_data.getDescriptorFromIndex(i)
+		if d == null or d.get("scene") == null:
+			continue
+		valid[i] = true
+		var name = d.getName()
+		names[i] = name
+		sockets[i] = int(item_data.getNumSockets(i))
+		# getDataPersistent exists on exactly one item script (Magic Ring);
+		# its blob width is int(getP("effects")) * (2 + 4) bits.
+		if name == "Magic Ring":
+			effects[i] = d.getP("effects")
+	var facts = {
+		"num_gems": int(item_data.getNumGems()),
+		"num_items": num_items,
+		"valid": valid,
+		"names": names,
+		"sockets": sockets,
+		"effects": effects,
+	}
+	_facts_cache[item_data] = facts
+	return facts
+
+
 # Display names of every item in the round, or null when the stream is
 # invalid. null means "cannot match exclusions on this round" - never a
-# player-visible error. item_data: the duck-typed item facts (see header).
+# player-visible error. item_data: the duck-typed item facts (see header);
+# consulted only through the per-object fact index.
 func decode_item_names(round_string: String, entry_version: String, item_data):
+	var facts = _facts(item_data)
 	var bs = BitStreamReader.new()
 	if not bs.from_godot_string(round_string):
 		return null
 	if bs.pull(MAX_HEALTH) == -1 or bs.pull(MAX_STAMINA) == -1:
 		return null
 
-	var numGems = item_data.getNumGems()
+	var numGems = facts["num_gems"]
 	var gemRange = _binary_ceil(numGems + 1)
 	var emptySocketId = gemRange - 1
 
 	var numItems = LEGACY_NUM_ITEMS
 	if _later_or_equal(entry_version, "1.1.0"):
-		numItems = item_data.getNumItems()
+		numItems = facts["num_items"]
 
-	var names: Array = []
+	var valid: Array = facts["valid"]
+	var names: Array = facts["names"]
+	var sockets: Array = facts["sockets"]
+	var effects: Array = facts["effects"]
+	var out: Array = []
 	while bs.bits_left() >= 8:
 		var index = bs.pull(numItems)
 		if index == -1 or index >= numItems:
 			return null
-		var descriptor = item_data.getDescriptorFromIndex(index)
-		if descriptor == null or descriptor.get("scene") == null:
+		if not valid[index]:
 			return null
 		if bs.pull(INVENTORY_X) == -1 or bs.pull(INVENTORY_Y) == -1:
 			return null
 		if bs.pull(4) == -1:
 			return null
 
-		var name = descriptor.getName()
-		names.push_back(name)
+		var name = names[index]
+		out.push_back(name)
 
-		var numSockets = item_data.getNumSockets(index)
+		var numSockets = sockets[index]
 		if numSockets > 0:
 			var hasGems = bs.pull(2)
 			if hasGems == -1:
@@ -71,13 +121,11 @@ func decode_item_names(round_string: String, entry_version: String, item_data):
 					if gemIndex >= numGems and gemIndex != emptySocketId:
 						return null
 
-		# getDataPersistent exists on exactly one item script (Magic Ring);
-		# its blob width is int(getP("effects")) * (2 + 4) bits.
 		if name == "Magic Ring":
-			var numBits = int(descriptor.getP("effects")) * 6
+			var numBits = int(effects[index]) * 6
 			if bs.pull_bitsize(numBits) == -1:
 				return null
-	return names
+	return out
 
 
 static func _binary_ceil(number: float) -> int:

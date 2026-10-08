@@ -64,9 +64,11 @@ func _initialize() -> void:
 	test_refill()
 	test_class_anchor()
 	test_golden_db()
+	test_golden_sweep()
 	test_decode_item_names()
 	test_decode_golden_smoke()
 	test_bitstream_port()
+	test_bitstream_reference()
 	test_filter_unknown_item_warn()
 	test_filter_perfect_flag()
 	test_push_anchor()
@@ -410,12 +412,15 @@ func test_filter_exclusions() -> void:
 
 # 7. Refill: a filter that guts the rank-centered window doubles the
 # half-window until it covers the whole DB, deduping runs already kept.
+# Widening sweeps only the ring the earlier sweep did not cover (left slab
+# then right slab), so the refill parses each row once and the pool keeps
+# its dense-rank order: primary survivors, left slab, right slab.
 func test_refill() -> void:
 	print("[TEST] refill (widened window recovers filter survivors)")
 	# Primary window: adjusted rank 1250 +/- 1000 with LIMIT 100 -> dense
 	# ranks 250..349; 51 labeled dead leaves kept=49 < threshold=50 and the
 	# window [250..2250] does not cover all 2500 rows, so one refill at
-	# half=2000 (lo=1, hi=3250, LIMIT 3250) re-reads the whole DB:
+	# half=2000 (lo=1, hi=3250) sweeps the ring around 250..349:
 	# 2500 - 300 killed = 2200 survivors.
 	_fake_filter_kills = {}
 	for id in range(299, 350):
@@ -446,7 +451,48 @@ func test_refill() -> void:
 	var text = log_text(user_path("refill.log"))
 	ok(text.find("filter kept=49 filtered=51") != -1, "primary filter line counts the gutted window")
 	ok(text.find("refill half=2000 lo=1 hi=3250") != -1, "refill doubles half to cover the whole DB")
+	# Slab sweep: only the ring around ranks 250..349 is read, each row once.
+	eq(res.get("json_ok"), 2500, "slab refill reads every row exactly once")
+	ok(text.find("filter kept=249 filtered=0") != -1, "left slab sweeps ranks 1..249 with no kills")
+	ok(text.find("filter kept=1902 filtered=249") != -1, "right slab sweeps ranks 350..2500")
+	eq(int(res.get("runs")[0]["id"]), 250, "pool opens with the primary-window survivors")
+	eq(int(res.get("runs")[49]["id"]), 1, "left slab follows the primary survivors")
+	eq(int(res.get("runs")[298]["id"]), 350, "right slab follows the left slab")
 	_fake_filter_kills = {}
+
+# 7b. Exclusion sweep pin: the full golden DB through load_ghosts with no
+# exclusions - the byte-identical pool contract of the load rework (slab
+# refill, char-wise BitStream, item-fact index), pinned in dense order.
+func test_golden_sweep() -> void:
+	print("[TEST] golden sweep pin (full-DB survivors, dense order)")
+	var golden_path = ProjectSettings.globalize_path("res://").plus_file("../../seeder/LeaderboardSeeder.Tests/Fixtures/ghosts-fixture-64.gdb")
+	if not File.new().file_exists(golden_path):
+		# The file is committed; absence is a broken checkout, never a skip.
+		ok(false, "golden fixture missing: " + golden_path)
+		return
+	var g = make_ghost(golden_path, user_path("golden_sweep.log"), funcref(self, "golden_parse"))
+	var res = g.db.load_ghosts({
+		"player_r": 270.231926, "estimated_rank": 32, "db_row_count": 64,
+		"player_id": 1, "window": 64,
+	})
+	eq(res.get("ok"), true, "golden DB loads")
+	eq(res.get("runs").size(), 64, "every dense row survives an empty exclusion set")
+	var rs = []
+	for run in res.get("runs"):
+		rs.append(float(run["r"]))
+	eq(rs, [
+		342.884159, 266.646171, 270.231926, 273.436809, 361.948541, 251.998941,
+		81.898431, 327.265398, 94.382271, 245.192354, 60.118407, 86.044547,
+		139.296357, 313.039885, 319.974651, 380.192891, 317.550325, 341.376351,
+		324.891486, 350.014367, 415.196835, 333.560974, 292.016733, 342.032064,
+		363.434609, 216.618881, 238.330283, 320.539757, 63.789595, 107.313557,
+		214.821147, 376.304257, 258.895863, 269.833208, 251.563161, 84.125576,
+		277.719591, 338.90359, 328.0738, 289.291717, 402.460818, 330.895099,
+		108.219881, 64.545306, 195.081515, 310.929919, 354.818887, 186.101861,
+		221.463748, 149.804117, 65.248016, 219.713024, 97.797072, 313.095587,
+		108.398895, 82.229489, 294.989475, 147.536184, 223.421581, 185.625563,
+		320.540372, 321.386477, 261.259897, 311.297876,
+	], "survivor set and dense order pinned")
 
 # 8. Per-class anchor: switching classes re-estimates the rank from that
 # class's r even when the DB is unchanged, so the window centers on the
@@ -780,6 +826,60 @@ func test_bitstream_port() -> void:
 	eq(fresh.pull(999), -1, "dry pull of wide field returns -1")
 	ok(not BitStreamScript.new().from_godot_string("~"), "offset 64 rejected")
 	ok(not BitStreamScript.new().from_godot_string("!"), "offset below 0 rejected")
+
+# The char-wise reader must stay byte-identical to the per-bit math it
+# replaced: same bits in, same values out, same cursor states. The reference
+# re-implements the original per-bit reader over the BitWriter's public bits
+# array; 60 seeded pseudo-random streams cover char boundaries, partial
+# fields and dry pulls.
+func test_bitstream_reference() -> void:
+	var rng = RandomNumberGenerator.new()
+	rng.set_seed(20261008)
+	var mismatches = 0
+	var pulls = 0
+	for iter in range(60):
+		var w = BitWriterScript.new()
+		var n = rng.randi_range(24, 600)
+		for i in range(n):
+			w.bits.push_back(rng.randi_range(0, 1))
+		var bs = BitStreamScript.new()
+		if not bs.from_godot_string(w.to_godot_string()):
+			mismatches += 1
+			continue
+		# The reader sees the string's zero padding to a 6-bit char multiple;
+		# the reference must consume the same padded stream.
+		var pad = w.bits.duplicate()
+		while pad.size() % 6 != 0:
+			pad.push_back(0)
+		var ref = {"pos": 0}
+		while true:
+			# Board-decode-shaped schedule: wide fields, cell pairs, the
+			# 2-bit field, gem range, a no-op pull and a raw bitsize pull.
+			for width in [999, 999, 519, 10, 10, 4, 2, 64, 1, -7]:
+				var got = bs.pull_bitsize(7) if width == -7 else bs.pull(width)
+				var want = _ref_pull_bits(pad, 7, ref) if width == -7 \
+						else (0 if width <= 1 else _ref_pull_bits(pad, int(ceil(log(width) / log(2))), ref))
+				pulls += 1
+				if got != want:
+					mismatches += 1
+			if bs.bits_left() < 8:
+				break
+		if bs.bits_left() != pad.size() - int(ref["pos"]):
+			mismatches += 1
+	eq(mismatches, 0, "char-wise reader matches the per-bit reference (%d pulls)" % pulls)
+
+# Original per-bit pull semantics: exactly num_bits consumed MSB first, -1
+# with the cursor stopped at the first missing bit. Callers mirror pull()'s
+# rangeMax gate and width formula.
+func _ref_pull_bits(bits: Array, num_bits: int, state: Dictionary) -> int:
+	var value = 0
+	for digit in range(num_bits - 1, -1, -1):
+		if int(state["pos"]) == bits.size():
+			return -1
+		var bit = int(bits[int(state["pos"])])
+		value = value + (bit << digit)
+		state["pos"] = int(state["pos"]) + 1
+	return value
 
 # 10. Push anchor: a ranked upload must move the class anchor even though
 # pushed metadata never carries ugc — the adapter injects it before the

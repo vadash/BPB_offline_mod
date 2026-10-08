@@ -85,6 +85,11 @@ func setup(db_path: String, logger, parse_fn) -> void:
 	_parse_fn = parse_fn
 
 
+# Milliseconds elapsed since a OS.get_ticks_usec() timestamp.
+func _ms_since(t0: int) -> int:
+	return int((OS.get_ticks_usec() - t0) / 1000.0)
+
+
 # Read ghosts around the player for one download. state:
 #   player_r (cached Elo or null), estimated_rank, db_row_count (cached
 #   sidecar value), window (opponent window row limit), player_id (steam id,
@@ -154,32 +159,51 @@ func load_ghosts(state: Dictionary) -> Dictionary:
 	# Ghost exclusions: the adapter may inject a filter that labels runs to
 	# drop. GhostDb only forwards runs to it — game fields stay unread here.
 	var filter_fn = state.get("filter_fn", null)
-	var rows = _query_runs(player_rank, state["player_id"], state["window"])
+	var io_ms = 0
+	var parse_ms = 0
+	var filter_ms = 0
+	var t0 = OS.get_ticks_usec()
+	var swept = _query_runs(player_rank, state["player_id"], state["window"])
+	io_ms += _ms_since(t0)
+	var rows: Array = swept["rows"]
 	var raw_rows = rows.size()
 	_log.info("query_rows=%d" % raw_rows)
 	var totals = _parse_rows(rows)
+	parse_ms += int(totals["ms"])
 	out["runs"] = totals["runs"]
 	out["json_ok"] = totals["json_ok"]
 	out["parse_ok"] = totals["parse_ok"]
 	if filter_fn != null:
+		t0 = OS.get_ticks_usec()
 		out["runs"] = _apply_filter(out["runs"], filter_fn)
+		filter_ms += _ms_since(t0)
 	if out["parse_ok"] == 0 and raw_rows > 0:
 		_log.warn("parse_zero primary window yielded no parseable runs, retrying with middle-50% window")
 		var total_rows = out["db_rows"] if out["db_rows"] > 0 else _n
 		var lo_rank = int(total_rows * 0.25) + 1
 		var hi_rank = int(total_rows * 0.75)
-		var fb_rows = _window_rows(lo_rank, hi_rank, state["player_id"], state["window"])
-		var fb = _parse_rows(fb_rows)
-		out["runs"] += fb["runs"]
-		out["json_ok"] += fb["json_ok"]
-		out["parse_ok"] += fb["parse_ok"]
-		_log.info("fallback rows=%d parse_ok=%d" % [fb_rows.size(), fb["parse_ok"]])
+		t0 = OS.get_ticks_usec()
+		var fb = _window_rows(lo_rank, hi_rank, state["player_id"], state["window"])
+		io_ms += _ms_since(t0)
+		if fb["hi"] >= fb["lo"]:
+			swept = fb
+		var fb_parsed = _parse_rows(fb["rows"])
+		parse_ms += int(fb_parsed["ms"])
+		out["runs"] += fb_parsed["runs"]
+		out["json_ok"] += fb_parsed["json_ok"]
+		out["parse_ok"] += fb_parsed["parse_ok"]
+		_log.info("fallback rows=%d parse_ok=%d" % [fb["rows"].size(), fb_parsed["parse_ok"]])
 		if filter_fn != null:
+			t0 = OS.get_ticks_usec()
 			out["runs"] = _apply_filter(out["runs"], filter_fn)
+			filter_ms += _ms_since(t0)
 
 	# A filter that gutted the rank-centered window widens it: double the
 	# half-window until it covers the whole DB so exclusions cannot starve
 	# the match. The no-rank middle-50% fallback window is never refilled.
+	# Widening reads only the ring the earlier sweep did not cover (left slab
+	# then right slab, ascending, so the pool keeps its dense-rank order) —
+	# re-reading the swept range would make strict filters cost O(N).
 	if filter_fn != null and player_rank > 0:
 		var threshold = int(state["window"] / 2)
 		var bounds = _window_bounds(player_rank)
@@ -193,23 +217,39 @@ func load_ghosts(state: Dictionary) -> Dictionary:
 			half *= 2
 			var lo = max(1, player_rank - half)
 			var hi = player_rank + half
-			var rp_rows = _window_rows(lo, hi, state["player_id"], hi - lo + 1)
-			var rp = _parse_rows(rp_rows)
-			out["json_ok"] += rp["json_ok"]
-			out["parse_ok"] += rp["parse_ok"]
-			var refill = _apply_filter(rp["runs"], filter_fn)
-			for run in refill:
-				var rid = _run_key(run)
-				if rid != null:
-					if seen.has(rid):
-						continue
-					seen[rid] = true
-				out["runs"].push_back(run)
+			var ring_ms = 0
+			for side in [[lo, int(swept["lo"]) - 1], [int(swept["hi"]) + 1, hi]]:
+				var side_lo: int = max(1, side[0])
+				var side_hi: int = min(hi, side[1])
+				if side_lo > side_hi:
+					continue
+				t0 = OS.get_ticks_usec()
+				var rp_rows = _window_rows(side_lo, side_hi, state["player_id"], side_hi - side_lo + 1)
+				var side_io = _ms_since(t0)
+				io_ms += side_io
+				var rp = _parse_rows(rp_rows["rows"])
+				parse_ms += int(rp["ms"])
+				ring_ms += side_io + int(rp["ms"])
+				out["json_ok"] += rp["json_ok"]
+				out["parse_ok"] += rp["parse_ok"]
+				t0 = OS.get_ticks_usec()
+				var refill = _apply_filter(rp["runs"], filter_fn)
+				var side_filter = _ms_since(t0)
+				filter_ms += side_filter
+				ring_ms += side_filter
+				for run in refill:
+					var rid = _run_key(run)
+					if rid != null:
+						if seen.has(rid):
+							continue
+						seen[rid] = true
+					out["runs"].push_back(run)
 			bounds["lo"] = lo
 			bounds["hi"] = hi
-			_log.info("refill half=%d lo=%d hi=%d kept=%d" % [half, lo, hi, out["runs"].size()])
+			swept = {"lo": lo, "hi": hi}
+			_log.info("refill half=%d lo=%d hi=%d kept=%d ms=%d" % [half, lo, hi, out["runs"].size(), ring_ms])
 
-	_log.info("load db_rows=%d rank=%d runs=%d json_ok=%d parse_ok=%d" % [out["db_rows"], player_rank, out["runs"].size(), out["json_ok"], out["parse_ok"]])
+	_log.info("load db_rows=%d rank=%d runs=%d json_ok=%d parse_ok=%d io_ms=%d parse_ms=%d filter_ms=%d" % [out["db_rows"], player_rank, out["runs"].size(), out["json_ok"], out["parse_ok"], io_ms, parse_ms, filter_ms])
 	return out
 
 
@@ -386,19 +426,24 @@ func _window_bounds(rank: int) -> Dictionary:
 
 # The old WINDOW_SQL as array arithmetic: dense ranks lo..hi ascending
 # (index = rank - 1, lo clamped to 1, hi clamped to N), raw_len > 10, own
-# steam_id excluded, at most limit rows.
-func _window_rows(lo: int, hi: int, player_id: int, limit: int) -> Array:
+# steam_id excluded, at most limit rows. Returns the rows plus the swept
+# dense range (1-based inclusive, hi=0 when nothing was processed): the
+# ranks the loop actually iterated, skips included - a refill widens around
+# them instead of re-reading them.
+func _window_rows(lo: int, hi: int, player_id: int, limit: int) -> Dictionary:
 	var rows: Array = []
+	var swept_hi = 0
 	if limit <= 0:
-		return rows
+		return {"rows": rows, "lo": 0, "hi": 0}
 	var lo_i = max(1, lo) - 1
 	var hi_i = min(hi, _n) - 1
 	if lo_i > hi_i:
-		return rows
+		return {"rows": rows, "lo": 0, "hi": 0}
 	var f = File.new()
 	if f.open(_db_path, File.READ) != OK:
-		return rows
+		return {"rows": rows, "lo": 0, "hi": 0}
 	for i in range(lo_i, hi_i + 1):
+		swept_hi = i + 1
 		if player_id != -1 and int(_steam_ids[i]) == player_id:
 			continue
 		f.seek(int(_blob_offsets[i]))
@@ -410,7 +455,22 @@ func _window_rows(lo: int, hi: int, player_id: int, limit: int) -> Array:
 		if rows.size() >= limit:
 			break
 	f.close()
-	return rows
+	return {"rows": rows, "lo": max(1, lo), "hi": swept_hi}
+
+
+func _query_runs(rank: int, player_id: int, limit: int) -> Dictionary:
+	if rank > 0:
+		var b = _window_bounds(rank)
+		var primary = _window_rows(b["lo"], b["hi"], player_id, limit)
+		if not primary["rows"].empty():
+			return primary
+
+	if _n > 0:
+		var lo_rank = int(_n * 0.25) + 1
+		var hi_rank = int(_n * 0.75)
+		_log.warn("no_rank using middle-50%% window=[%d-%d] total_rows=%d" % [lo_rank, hi_rank, _n])
+		return _window_rows(lo_rank, hi_rank, player_id, limit)
+	return {"rows": [], "lo": 0, "hi": 0}
 
 
 # Decompresses the gzip stream just read at the cursor into a UTF-8 string;
@@ -425,24 +485,12 @@ func _blob_string(f, comp_len: int, raw_len: int) -> String:
 	return raw.get_string_from_utf8()
 
 
-func _query_runs(rank: int, player_id: int, limit: int) -> Array:
-	if rank > 0:
-		var b = _window_bounds(rank)
-		var rows = _window_rows(b["lo"], b["hi"], player_id, limit)
-		if not rows.empty():
-			return rows
-
-	if _n > 0:
-		var lo_rank = int(_n * 0.25) + 1
-		var hi_rank = int(_n * 0.75)
-		_log.warn("no_rank using middle-50%% window=[%d-%d] total_rows=%d" % [lo_rank, hi_rank, _n])
-		return _window_rows(lo_rank, hi_rank, player_id, limit)
-	return []
-
-
 # Apply an injected exclusion filter: "" keeps a run, any other return is a
 # rule label. Runs are forwarded untouched — GhostDb never reads game fields.
+# Times itself: the sweep is the load's dominant cost and the load line
+# reports its total.
 func _apply_filter(runs: Array, filter_fn) -> Array:
+	var t0 = OS.get_ticks_usec()
 	var kept: Array = []
 	var kills: Dictionary = {}
 	for run in runs:
@@ -451,15 +499,16 @@ func _apply_filter(runs: Array, filter_fn) -> Array:
 			kept.push_back(run)
 		else:
 			kills[rule] = int(kills.get(rule, 0)) + 1
-	_log.info("filter kept=%d filtered=%d rules=%s" % [kept.size(), runs.size() - kept.size(), str(kills)])
+	_log.info("filter kept=%d filtered=%d ms=%d rules=%s" % [kept.size(), runs.size() - kept.size(), _ms_since(t0), str(kills)])
 	return kept
 
 
 # Parse metadata strings through the injected game parser. Returns the
 # parser's own results (plain dictionaries in tests, game run objects in the
-# mod) plus the json/parse counters — same keys, same slicing, same failure
-# counting as before the split.
+# mod) plus the json/parse counters and its own ms — same keys, same slicing,
+# same failure counting as before the split.
 func _parse_rows(rows: Array) -> Dictionary:
+	var t0 = OS.get_ticks_usec()
 	var json_ok = 0
 	var parse_ok = 0
 	var runs: Array = []
@@ -477,4 +526,4 @@ func _parse_rows(rows: Array) -> Dictionary:
 				_log.warn("parse_fail row=%d keys=%s" % [json_ok, str(dict.keys().slice(0, 6))])
 		elif json_ok == 0:
 			_log.warn("json_fail error=%d type=%d preview=%s" % [parsed.error, typeof(parsed.result), meta.substr(0, 60)])
-	return {"json_ok": json_ok, "parse_ok": parse_ok, "runs": runs}
+	return {"json_ok": json_ok, "parse_ok": parse_ok, "runs": runs, "ms": _ms_since(t0)}

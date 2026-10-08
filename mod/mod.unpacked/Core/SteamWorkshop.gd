@@ -350,6 +350,20 @@ func _load_from_db() -> void:
 	for run in res.runs:
 		parsedRuns.push_back(run)
 
+	# Acceptance aid, off by default: BBOF_DUMP_RUNS=1 writes one run key
+	# per line in pool order next to the exe, so a pipeline change can be
+	# diffed old-vs-new byte for byte.
+	if OS.get_environment("BBOF_DUMP_RUNS") == "1":
+		var dump = File.new()
+		if dump.open(_state_path.get_base_dir() + "/bbof_runs.txt", File.WRITE) == OK:
+			for run in parsedRuns:
+				var rid = run.get("id")
+				if rid == null:
+					rid = run.get("playerId")
+				dump.store_line(str(rid))
+			dump.close()
+			_log.info("runs_dumped path=bbof_runs.txt count=%d" % parsedRuns.size())
+
 	gotResponse = true
 	downloading = false
 	RunDatabase.call_deferred("onSteamRunsReceived")
