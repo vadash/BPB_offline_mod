@@ -9,16 +9,10 @@ internal static class RunFilter
 {
 	internal enum Dedup { None, SteamId, SteamIdAndContent }
 
-	internal sealed record FilterSettings(int KeepD, int CutBottom)
+	internal sealed record FilterSettings(int KeepD, double MinR)
 	{
-		internal static readonly FilterSettings Seed = new(4, 50);
-
-		// Merge re-applies only the version window (same keep-d as a seed
-		// run, walk-back from the union's newest code). The rating floor
-		// never re-applies: inputs are already pre-cut.
-		internal static FilterSettings Merge => ForMerge(Seed.KeepD);
-
-		internal static FilterSettings ForMerge(int keepD) => new(keepD, 0);
+		// MinR <= 0 turns the rating floor off.
+		internal static readonly FilterSettings Seed = new(4, 60.0);
 	}
 
 	internal sealed record CodeStat(string Code, int Total, int Kept);
@@ -151,12 +145,15 @@ internal static class RunFilter
 		List<Entry> inWindow = survivors.Where(e => window.Contains(VersionCode(e.D))).ToList();
 		int windowCut = survivors.Count - inWindow.Count;
 
-		double floor = RatingFloor(inWindow.Select(e => e.R), settings.CutBottom);
+		// The rating floor is a static threshold, inclusive: a row exactly at
+		// MinR stays. MinR <= 0 disables it; Floor reports the configured
+		// threshold (0 when off), so re-cutting pre-cut inputs is idempotent.
+		double floor = settings.MinR;
 		List<Entry> kept = new List<Entry>(inWindow.Count);
 		int floorCut = 0;
 		foreach (Entry row in inWindow)
 		{
-			if (row.R >= floor)
+			if (floor <= 0 || row.R >= floor)
 			{
 				if (perCodeSlot is not null && perCodeSlot.TryGetValue(VersionCode(row.D), out int slot))
 				{
@@ -182,25 +179,5 @@ internal static class RunFilter
 		string[] window = new string[keep];
 		Array.Copy(distinct, distinct.Length - keep, window, 0, keep);
 		return window;
-	}
-
-	public static double RatingFloor(IEnumerable<double> ratings, int percent)
-	{
-		if (percent <= 0)
-		{
-			return double.NegativeInfinity;
-		}
-		double[] sorted = ratings.OrderBy(r => r).ToArray();
-		if (sorted.Length == 0)
-		{
-			return double.NegativeInfinity;
-		}
-		// at most index = n*P/100 rows sort strictly below sorted[index], so ties at the threshold keep cut <= P%
-		int index = (int)((long)sorted.Length * percent / 100);
-		if (index >= sorted.Length)
-		{
-			index = sorted.Length - 1;
-		}
-		return sorted[index];
 	}
 }

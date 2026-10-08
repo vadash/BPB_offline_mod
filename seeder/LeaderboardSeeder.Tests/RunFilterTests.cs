@@ -113,53 +113,54 @@ public class ApplyTests
 			r.ToString(System.Globalization.CultureInfo.InvariantCulture) + "}");
 
 	[Fact]
-	public void Apply_seed_settings_windows_and_floors_in_input_order()
+	public void Apply_seed_settings_keeps_rows_at_or_above_min_r()
 	{
-		// Distinct codes {OA..OE}: keepD 4 cuts the one OA row; floor at
-		// sorted[6*50/100] = 50 cuts the three rows below 50. Kept stays in
-		// input order — Apply never sorts.
+		// Seed floor 60.0: distinct codes {OA..OE} cut the one OA row by the
+		// version window first; in-window rows below 60 cut by the floor.
+		// Kept stays in input order — Apply never sorts.
 		var rows = new List<Entry>
 		{
 			Row(1, 10.0, "OAa"),
 			Row(2, 20.0, "OBh"),
 			Row(3, 30.0, "OCc"),
 			Row(4, 40.0, "ODd"),
-			Row(5, 50.0, "OEe"),
-			Row(6, 60.0, "OEf"),
-			Row(7, 70.0, "OBg"),
+			Row(5, 60.0, "OEe"),
+			Row(6, 70.0, "OEf"),
+			Row(7, 59.9, "OBg"),
 		};
 
 		RunFilter.FilterResult result = RunFilter.Apply(rows, RunFilter.Dedup.None, RunFilter.FilterSettings.Seed);
 
-		Assert.Equal(new ulong[] { 5, 6, 7 }, result.Kept.Select(e => e.SteamId));
+		Assert.Equal(new ulong[] { 5, 6 }, result.Kept.Select(e => e.SteamId));
 		Assert.Equal(1, result.WindowCut);
-		Assert.Equal(3, result.FloorCut);
-		Assert.Equal(50.0, result.Floor);
+		Assert.Equal(4, result.FloorCut);
+		Assert.Equal(60.0, result.Floor);
 		Assert.Empty(result.PerCode);
 		Assert.Empty(result.InputDups);
 	}
 
 	[Fact]
-	public void Apply_merge_settings_keep_last_4_versions()
+	public void Apply_keeps_row_exactly_at_min_r()
 	{
-		// Merge defaults to the seeder's keep-d (4): distinct codes {OA..OE}
-		// keep OB..OE and cut the OA row. The rating floor never fires at
-		// merge; inputs are pre-cut.
-		var rows = new List<Entry>
-		{
-			Row(1, 10.0, "OAa"),
-			Row(2, 20.0, "OBb"),
-			Row(3, 30.0, "OCc"),
-			Row(4, 40.0, "ODd"),
-			Row(5, 50.0, "OEe"),
-		};
+		var rows = new List<Entry> { Row(1, 60.0, "OCa"), Row(2, 59.999, "OCb") };
 
-		RunFilter.FilterResult result = RunFilter.Apply(rows, RunFilter.Dedup.None, RunFilter.FilterSettings.Merge);
+		RunFilter.FilterResult result = RunFilter.Apply(rows, RunFilter.Dedup.None, RunFilter.FilterSettings.Seed);
 
-		Assert.Equal(new ulong[] { 2, 3, 4, 5 }, result.Kept.Select(e => e.SteamId));
-		Assert.Equal(1, result.WindowCut);
+		Assert.Equal(new ulong[] { 1 }, result.Kept.Select(e => e.SteamId));
+		Assert.Equal(1, result.FloorCut);
+		Assert.Equal(60.0, result.Floor);
+	}
+
+	[Fact]
+	public void Apply_min_r_zero_keeps_everything_and_reports_floor_zero()
+	{
+		var rows = new List<Entry> { Row(1, 1.0, "OCa"), Row(2, 2.0, "OCb"), Row(3, 3.0, "OCc") };
+
+		RunFilter.FilterResult result = RunFilter.Apply(rows, RunFilter.Dedup.None, new RunFilter.FilterSettings(KeepD: 4, MinR: 0));
+
+		Assert.Equal(3, result.Kept.Count);
 		Assert.Equal(0, result.FloorCut);
-		Assert.Equal(double.NegativeInfinity, result.Floor);
+		Assert.Equal(0.0, result.Floor);
 	}
 
 	[Fact]
@@ -167,7 +168,7 @@ public class ApplyTests
 	{
 		var rows = new List<Entry> { Row(5, 50.0, "OCx"), Row(5, 60.0, "OCy"), Row(7, 40.0, "OCz") };
 
-		RunFilter.FilterResult result = RunFilter.Apply(rows, RunFilter.Dedup.SteamId, RunFilter.FilterSettings.Merge);
+		RunFilter.FilterResult result = RunFilter.Apply(rows, RunFilter.Dedup.SteamId, new RunFilter.FilterSettings(KeepD: 4, MinR: 0));
 
 		Assert.Equal(new ulong[] { 5, 7 }, result.Kept.Select(e => e.SteamId));
 		Assert.Equal(50.0, result.Kept[0].R);
@@ -186,7 +187,7 @@ public class ApplyTests
 			Row(8, 35.0, "OCw", m3),
 		};
 
-		RunFilter.FilterResult result = RunFilter.Apply(rows, RunFilter.Dedup.SteamIdAndContent, RunFilter.FilterSettings.Merge);
+		RunFilter.FilterResult result = RunFilter.Apply(rows, RunFilter.Dedup.SteamIdAndContent, new RunFilter.FilterSettings(KeepD: 4, MinR: 0));
 
 		Assert.Equal(new ulong[] { 5, 5, 8 }, result.Kept.Select(e => e.SteamId));
 	}
@@ -198,9 +199,9 @@ public class ApplyTests
 		{
 			Row(5, 50, "OCa"), Row(5, 50, "OCa"), Row(5, 50, "OCa"), Row(6, 40, "OCb"), Row(7, 30, "OCc"),
 		};
-		var tags = new List<string?> { "b.gdb", "b.gdb", "a.gdb", "a.gdb", "b.gdb" };
+		var tags = new List<string> { "b.gdb", "b.gdb", "a.gdb", "a.gdb", "b.gdb" };
 
-		RunFilter.FilterResult result = RunFilter.Apply(rows, RunFilter.Dedup.SteamId, RunFilter.FilterSettings.Merge, tags);
+		RunFilter.FilterResult result = RunFilter.Apply(rows, RunFilter.Dedup.SteamId, new RunFilter.FilterSettings(KeepD: 4, MinR: 0), tags);
 
 		Assert.Equal(new ulong[] { 5, 6, 7 }, result.Kept.Select(e => e.SteamId));
 		// first duplicate comes from b.gdb, then from a.gdb; the b.gdb repeat
@@ -212,10 +213,10 @@ public class ApplyTests
 	public void Apply_without_dedup_or_input_tags_reports_no_duplicates()
 	{
 		var rows = new List<Entry> { Row(5, 50, "OCa"), Row(5, 60, "OCb") };
-		var tags = new List<string?> { "a.gdb", "b.gdb" };
+		var tags = new List<string> { "a.gdb", "b.gdb" };
 
-		RunFilter.FilterResult deduped = RunFilter.Apply(rows, RunFilter.Dedup.None, RunFilter.FilterSettings.Merge, tags);
-		RunFilter.FilterResult untagged = RunFilter.Apply(rows, RunFilter.Dedup.SteamId, RunFilter.FilterSettings.Merge);
+		RunFilter.FilterResult deduped = RunFilter.Apply(rows, RunFilter.Dedup.None, new RunFilter.FilterSettings(KeepD: 4, MinR: 0), tags);
+		RunFilter.FilterResult untagged = RunFilter.Apply(rows, RunFilter.Dedup.SteamId, new RunFilter.FilterSettings(KeepD: 4, MinR: 0));
 
 		Assert.Equal(2, deduped.Kept.Count);
 		Assert.Empty(deduped.InputDups);
@@ -229,9 +230,9 @@ public class ApplyTests
 		var rows = new List<Entry> { Row(1, 10.0, "OCa"), Row(2, 20.0, "OCb"), Row(3, 30.0, "ODc") };
 		var totals = new List<RunFilter.CodeStat> { new("OC", 2, 0), new("OD", 1, 0) };
 
-		RunFilter.FilterResult result = RunFilter.Apply(rows, RunFilter.Dedup.None, RunFilter.FilterSettings.Seed, perCodeTotals: totals);
+		RunFilter.FilterResult result = RunFilter.Apply(rows, RunFilter.Dedup.None, new RunFilter.FilterSettings(KeepD: 4, MinR: 20.0), perCodeTotals: totals);
 
-		// floor over [10,20,30] at 50% = sorted[1] = 20: the 10.0 row is cut
+		// floor 20.0 keeps the row exactly at the threshold: the 10.0 row is cut
 		Assert.Equal(new ulong[] { 2, 3 }, result.Kept.Select(e => e.SteamId));
 		Assert.Equal(new[] { ("OC", 2, 1), ("OD", 1, 1) }, result.PerCode.Select(c => (c.Code, c.Total, c.Kept)));
 		Assert.Equal(20.0, result.Floor);
@@ -243,7 +244,7 @@ public class ApplyTests
 		var rows = new List<Entry> { Row(1, 10.0, "OCa") };
 		var totals = new List<RunFilter.CodeStat> { new("OC", 1, 0) };
 
-		RunFilter.Apply(rows, RunFilter.Dedup.None, RunFilter.FilterSettings.Merge, perCodeTotals: totals);
+		RunFilter.Apply(rows, RunFilter.Dedup.None, new RunFilter.FilterSettings(KeepD: 4, MinR: 0), perCodeTotals: totals);
 
 		Assert.Equal(0, totals[0].Kept);
 	}

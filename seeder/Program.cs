@@ -23,8 +23,8 @@ internal class Program
 		bool dbFromFlag = false;
 		int keepD = RunFilter.FilterSettings.Seed.KeepD;
 		bool keepDFromFlag = false;
-		int cutBottom = RunFilter.FilterSettings.Seed.CutBottom;
-		bool cutBottomFromFlag = false;
+		double minR = RunFilter.FilterSettings.Seed.MinR;
+		bool minRFromFlag = false;
 		for (int i = 0; i < args.Length; i++)
 		{
 			if (args[i] == "--db" && i + 1 < args.Length)
@@ -54,29 +54,23 @@ internal class Program
 				}
 				keepDFromFlag = true;
 			}
-			if (args[i] == "--cut-bottom" && i + 1 < args.Length)
+			if (args[i] == "--min-r" && i + 1 < args.Length)
 			{
-				if (!int.TryParse(args[++i], out cutBottom))
+				if (!double.TryParse(args[++i], System.Globalization.CultureInfo.InvariantCulture, out minR))
 				{
-					Console.Error.WriteLine("[ERR] --cut-bottom must be an integer.");
+					Console.Error.WriteLine("[ERR] --min-r must be a number.");
 					return 1;
 				}
-				if (cutBottom < 0)
+				if (minR < 0)
 				{
-					cutBottom = 0;
+					minR = 0;
 				}
-				if (cutBottom > 100)
-				{
-					cutBottom = 100;
-				}
-				cutBottomFromFlag = true;
+				minRFromFlag = true;
 			}
 		}
 		if (mergeDir != null)
 		{
-			// The merge output keeps the seeder's version window: walk back
-			// from the union's newest version code to keep-d codes. The
-			// rating floor never re-applies; inputs are already pre-cut.
+			// Version window and rating floor rules live in the merger.
 			Console.WriteLine("[..] Mode: merge folder " + mergeDir);
 			if (dbFromFlag)
 			{
@@ -84,14 +78,11 @@ internal class Program
 			}
 			Console.WriteLine("[..] Output: " + Path.Combine(mergeDir, GhostDb.MergeFileName(today)));
 			Console.WriteLine("[..] Keep window: last " + keepD + " versions" + (keepDFromFlag ? " (flag)" : " (default)"));
-			if (cutBottomFromFlag)
-			{
-				Console.WriteLine("[..] --cut-bottom ignored in merge mode; inputs are already pre-cut.");
-			}
-			return Merger.RunMerge(mergeDir, keepD, Console.Out, Console.Error, today);
+			Console.WriteLine("[..] Rating floor: " + minR.ToString(System.Globalization.CultureInfo.InvariantCulture) + (minRFromFlag ? " (flag)" : " (default)"));
+			return Merger.RunMerge(mergeDir, keepD, minR, Console.Out, Console.Error, today);
 		}
 		Console.WriteLine("[..] Keep window: last " + keepD + " versions" + (keepDFromFlag ? " (flag)" : " (default)"));
-		Console.WriteLine("[..] Cut bottom: " + cutBottom + "%" + (cutBottomFromFlag ? " (flag)" : " (default)"));
+		Console.WriteLine("[..] Rating floor: " + minR.ToString(System.Globalization.CultureInfo.InvariantCulture) + (minRFromFlag ? " (flag)" : " (default)"));
 		Console.WriteLine("[..] Output: " + text);
 		// Steam client lifecycle: if the client is down the seeder starts it
 		// and closes it once the downloads are done — but only a client the
@@ -394,8 +385,8 @@ internal class Program
 			.Select(e => new LeaderboardEntryT { m_steamIDUser = e.steamId, m_nGlobalRank = e.rank, m_nScore = e.score, m_hUGC = e.workshopId })
 			.ToList();
 		RunFilter.AdmitResult admit = RunFilter.Admit(rankOrderedRaw, dictionary);
-		RunFilter.FilterSettings settings = keepDFromFlag || cutBottomFromFlag
-			? new RunFilter.FilterSettings(keepD, cutBottom)
+		RunFilter.FilterSettings settings = keepDFromFlag || minRFromFlag
+			? new RunFilter.FilterSettings(keepD, minR)
 			: RunFilter.FilterSettings.Seed;
 		RunFilter.FilterResult filtered = RunFilter.Apply(
 			admit.Candidates,
@@ -403,7 +394,7 @@ internal class Program
 			settings,
 			perCodeTotals: admit.PerCode);
 		Console.WriteLine($" {admit.Candidates.Count:N0} parseable, rating floor {filtered.Floor:R}, cut {filtered.FloorCut:N0} below floor.");
-		Console.WriteLine($"[..] {filtered.Kept.Count:N0} valid (pruned {list.Count - filtered.Kept.Count:N0} invalid/filtered entries, last {settings.KeepD} versions, bottom {settings.CutBottom}%).");
+		Console.WriteLine($"[..] {filtered.Kept.Count:N0} valid (pruned {list.Count - filtered.Kept.Count:N0} invalid/filtered entries, last {settings.KeepD} versions, rating floor {settings.MinR:R}).");
 		foreach (RunFilter.CodeStat stat in filtered.PerCode)
 		{
 			Console.WriteLine($"     {stat.Code}  kept {stat.Kept,7:N0}  cut {stat.Total - stat.Kept,7:N0}  total {stat.Total,8:N0}");

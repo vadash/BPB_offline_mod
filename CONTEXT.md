@@ -63,11 +63,11 @@ Oldest game version accepted as a ghost. The mod probes it live at startup and p
 _Avoid_: min version, version floor
 
 **Rating floor**:
-Bottom fraction of runs by `r` excluded from the ghost DB. Seeder-side percentile over the runs that survive version selection.
-_Avoid_: rank cut, trim, percentile filter
+Runs with `r` below a fixed threshold excluded from the ghost DB. Static threshold, the same in seeder and merger; the merger re-applies it over the union.
+_Avoid_: rank cut, trim, percentile filter, percentile
 
 **Run filter**:
-The shared pipeline both seeder paths run rows through: admission, dedup, version window, rating floor. Lives in the seeder; the merger runs dedup and the version window over the union of its input ghost DBs and never re-applies the rating floor, because its inputs are pre-cut.
+The shared pipeline both seeder paths run rows through: admission, dedup, version window, rating floor. Lives in the seeder; the merger runs dedup, the version window, and the rating floor over the union of its input ghost DBs. A static floor makes pre-cut inputs safe to re-cut: merging normalizes legacy inputs to the current threshold.
 _Avoid_: pruning, filtering step
 
 **Version window**:

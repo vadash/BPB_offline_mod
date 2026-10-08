@@ -6,10 +6,11 @@ using System.Linq;
 namespace LeaderboardSeeder;
 
 // Deduplicates rows read from several ghost DBs and re-applies the version
-// window (RunFilter) over the union; the rating floor never re-applies
-// because its inputs are pre-cut. Output row order is rating order
-// (r descending, steam id ascending on ties), which becomes the merged DB's
-// dense-rank order.
+// window and the rating floor (RunFilter) over the union. The floor uses the
+// same static threshold as a seed run, so legacy inputs cut at an older floor
+// normalize to the current one and merging pre-cut inputs cuts nothing new.
+// Output row order is rating order (r descending, steam id ascending on
+// ties), which becomes the merged DB's dense-rank order.
 internal static class Merger
 {
 	public sealed record InputReport(string Name, int Total, int Rejected, int Duplicates);
@@ -17,9 +18,10 @@ internal static class Merger
 	public sealed record MergeResult(
 		IReadOnlyList<Entry> Kept,
 		IReadOnlyList<InputReport> Inputs,
-		int WindowCut);
+		int WindowCut,
+		int FloorCut);
 
-	public static MergeResult Merge(IList<(string Name, IReadOnlyList<Entry> Rows, int Rejected)> inputs, int keepD)
+	public static MergeResult Merge(IList<(string Name, IReadOnlyList<Entry> Rows, int Rejected)> inputs, int keepD, double minR)
 	{
 		List<Entry> union = new List<Entry>();
 		List<string> tags = new List<string>();
@@ -29,7 +31,7 @@ internal static class Merger
 			tags.AddRange(Enumerable.Repeat(name, rows.Count));
 		}
 		RunFilter.FilterResult filtered = RunFilter.Apply(union, RunFilter.Dedup.SteamIdAndContent,
-			RunFilter.FilterSettings.ForMerge(keepD), tags);
+			new RunFilter.FilterSettings(keepD, minR), tags);
 		Dictionary<string, int> duplicates = filtered.InputDups.ToDictionary(d => d.Input, d => d.Duplicates);
 		List<InputReport> reports = new List<InputReport>(inputs.Count);
 		foreach ((string name, IReadOnlyList<Entry> rows, int rejected) in inputs)
@@ -44,7 +46,7 @@ internal static class Merger
 			return byRating != 0 ? byRating : a.SteamId.CompareTo(b.SteamId);
 		});
 
-		return new MergeResult(kept, reports, filtered.WindowCut);
+		return new MergeResult(kept, reports, filtered.WindowCut, filtered.FloorCut);
 	}
 
 	// Folder orchestration: scan top-level *.gdb (older dated merge outputs
@@ -54,7 +56,7 @@ internal static class Merger
 	// name is excluded from the scan, so a same-day rerun rebuilds from the
 	// other ghost DBs instead of reading (then clobbering) its target.
 	// Returns a process exit code.
-	public static int RunMerge(string folder, int keepD, TextWriter log, TextWriter err, DateOnly? today = null)
+	public static int RunMerge(string folder, int keepD, double minR, TextWriter log, TextWriter err, DateOnly? today = null)
 	{
 		if (!Directory.Exists(folder))
 		{
@@ -114,12 +116,13 @@ internal static class Merger
 		int totalRejected;
 		try
 		{
-			result = Merge(inputs, keepD);
+			result = Merge(inputs, keepD, minR);
 			unionCount = result.Kept.Count + result.WindowCut;
 			totalDuplicates = result.Inputs.Sum(i => i.Duplicates);
 			totalRejected = result.Inputs.Sum(i => i.Rejected);
 			log.WriteLine($"[..] {unionCount:N0} unique rows across {inputs.Count} inputs, {totalDuplicates} duplicates, {totalRejected} rejected.");
 			log.WriteLine($"[..] Version window cut {result.WindowCut:N0}.");
+			log.WriteLine($"[..] Rating floor {minR.ToString(System.Globalization.CultureInfo.InvariantCulture)} cut {result.FloorCut:N0}.");
 
 			log.Write("[..] Writing " + outputPath + " ...");
 			GhostDb.Write(result.Kept, outputPath, (done, total) =>

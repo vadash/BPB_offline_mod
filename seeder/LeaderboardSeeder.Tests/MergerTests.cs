@@ -27,7 +27,7 @@ public class MergerTests
 			Input("b.gdb", 1, Row(1000, 50.0, "OCaa", shared.Metadata), Row(3000, 30.0, "ODcc")),
 		};
 
-		Merger.MergeResult result = Merger.Merge(inputs, keepD: 4);
+		Merger.MergeResult result = Merger.Merge(inputs, keepD: 4, minR: 0);
 
 		Assert.Equal(new ulong[] { 1000, 2000, 3000 }, result.Kept.Select(e => e.SteamId));
 		Assert.Equal(1, result.Inputs.Single(i => i.Name == "b.gdb").Duplicates);
@@ -45,7 +45,7 @@ public class MergerTests
 			Input("b.gdb", 0, Row(1000, 60.0, "ODbb", "{\"d\":\"ODbb\",\"r\":60,\"0\":\"boardB\"}")),
 		};
 
-		Merger.MergeResult result = Merger.Merge(inputs, keepD: 4);
+		Merger.MergeResult result = Merger.Merge(inputs, keepD: 4, minR: 0);
 
 		Assert.Equal(2, result.Kept.Count);
 		Assert.All(result.Inputs, i => Assert.Equal(0, i.Duplicates));
@@ -61,7 +61,7 @@ public class MergerTests
 			Input("b.gdb", 0, Row(2000, 50.0, "OCaa", metadata)),
 		};
 
-		Merger.MergeResult result = Merger.Merge(inputs, keepD: 4);
+		Merger.MergeResult result = Merger.Merge(inputs, keepD: 4, minR: 0);
 
 		Assert.Equal(2, result.Kept.Count);
 	}
@@ -77,7 +77,7 @@ public class MergerTests
 			Input("new.gdb", 0, Row(2000, 30.0, "ODcc"), Row(3000, 20.0, "OEdd")),
 		};
 
-		Merger.MergeResult result = Merger.Merge(inputs, keepD: 2);
+		Merger.MergeResult result = Merger.Merge(inputs, keepD: 2, minR: 0);
 
 		Assert.All(result.Kept, e => Assert.False(e.D.StartsWith("OC"), "OC rows must be cut by the keep-d window"));
 		Assert.Equal(2, result.WindowCut);
@@ -92,9 +92,57 @@ public class MergerTests
 			Input("a.gdb", 0, Row(42, 50.0, "OCaa"), Row(7, 50.0, "OCbb"), Row(100, 60.0, "OCcc")),
 		};
 
-		Merger.MergeResult result = Merger.Merge(inputs, keepD: 4);
+		Merger.MergeResult result = Merger.Merge(inputs, keepD: 4, minR: 0);
 
 		Assert.Equal(new ulong[] { 100, 7, 42 }, result.Kept.Select(e => e.SteamId));
+	}
+
+	[Fact]
+	public void Merge_reapplies_rating_floor_over_union()
+	{
+		// Same floor as a seed run: rows below 60 cut even when every input
+		// row survived its own DB; the row exactly at 60 stays.
+		var inputs = new List<(string, IReadOnlyList<Entry>, int)>
+		{
+			Input("a.gdb", 0, Row(1000, 55.0, "OCaa"), Row(1001, 60.0, "OCbb")),
+			Input("b.gdb", 0, Row(2000, 70.0, "ODcc"), Row(3000, 40.0, "ODdd")),
+		};
+
+		Merger.MergeResult result = Merger.Merge(inputs, keepD: 4, minR: 60.0);
+
+		Assert.Equal(new ulong[] { 2000, 1001 }, result.Kept.Select(e => e.SteamId));
+		Assert.Equal(2, result.FloorCut);
+	}
+
+	[Fact]
+	public void Merge_explicit_min_r_cuts_by_that_threshold()
+	{
+		var inputs = new List<(string, IReadOnlyList<Entry>, int)>
+		{
+			Input("a.gdb", 0, Row(1000, 65.0, "OCaa"), Row(1001, 75.0, "ODbb")),
+		};
+
+		Merger.MergeResult result = Merger.Merge(inputs, keepD: 4, minR: 70.0);
+
+		Assert.Equal(new ulong[] { 1001 }, result.Kept.Select(e => e.SteamId));
+		Assert.Equal(1, result.FloorCut);
+	}
+
+	[Fact]
+	public void Merge_of_precut_inputs_cuts_nothing_new()
+	{
+		// Idempotence: merging inputs already cut at 60.0 cuts nothing new,
+		// so a same-day rerun over older merge outputs is a no-op on r.
+		var inputs = new List<(string, IReadOnlyList<Entry>, int)>
+		{
+			Input("a.gdb", 0, Row(1000, 60.0, "OCaa"), Row(1001, 80.0, "OCbb")),
+			Input("b.gdb", 0, Row(1000, 60.0, "OCaa"), Row(2000, 90.0, "ODcc")),
+		};
+
+		Merger.MergeResult result = Merger.Merge(inputs, keepD: 4, minR: 60.0);
+
+		Assert.Equal(3, result.Kept.Count);
+		Assert.Equal(0, result.FloorCut);
 	}
 }
 
@@ -122,7 +170,7 @@ public class RunMergeTests
 		string dir = TempFolder();
 		GhostDb.Write(new List<Entry> { Row(1, 1, "OCaa") }, Path.Combine(dir, "only.gdb"));
 
-		int code = Merger.RunMerge(dir, keepD: 4, _log, _err, today);
+		int code = Merger.RunMerge(dir, keepD: 4, minR: 60.0, _log, _err, today);
 
 		Assert.Equal(1, code);
 		Assert.Contains("at least 2", _err.ToString());
@@ -132,7 +180,7 @@ public class RunMergeTests
 	[Fact]
 	public void RunMerge_fails_on_missing_folder()
 	{
-		int code = Merger.RunMerge(Path.Combine(TempFolder(), "nope"), 4, _log, _err);
+		int code = Merger.RunMerge(Path.Combine(TempFolder(), "nope"), 4, 60.0, _log, _err);
 
 		Assert.Equal(1, code);
 	}
@@ -142,14 +190,14 @@ public class RunMergeTests
 	{
 		DateOnly today = new(2026, 1, 10);
 		string dir = TempFolder();
-		GhostDb.Write(new List<Entry> { Row(1000, 50.0, "OCaa"), Row(1001, 40.0, "OCbb") }, Path.Combine(dir, "a.gdb"));
-		GhostDb.Write(new List<Entry> { Row(1000, 50.0, "OCaa"), Row(2000, 30.0, "ODcc") }, Path.Combine(dir, "b.gdb"));
+		GhostDb.Write(new List<Entry> { Row(1000, 70.0, "OCaa"), Row(1001, 65.0, "OCbb") }, Path.Combine(dir, "a.gdb"));
+		GhostDb.Write(new List<Entry> { Row(1000, 70.0, "OCaa"), Row(2000, 62.0, "ODcc") }, Path.Combine(dir, "b.gdb"));
 		string output = Path.Combine(dir, "ghosts-merged-10-01-26.gdb");
 		// A garbage same-day output must not poison the rerun: it is the
 		// merge target, excluded from the input scan.
 		File.WriteAllBytes(output, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
 
-		int code = Merger.RunMerge(dir, keepD: 4, _log, _err, today);
+		int code = Merger.RunMerge(dir, keepD: 4, minR: 60.0, _log, _err, today);
 
 		Assert.Equal(0, code);
 		GhostDb.ReadResult merged = GhostDb.Read(output);
@@ -168,11 +216,11 @@ public class RunMergeTests
 		DateOnly today = new(2026, 1, 10);
 		DateOnly yesterday = today.AddDays(-1);
 		string dir = TempFolder();
-		GhostDb.Write(new List<Entry> { Row(1000, 50.0, "OCaa"), Row(1001, 40.0, "OCbb") },
+		GhostDb.Write(new List<Entry> { Row(1000, 70.0, "OCaa"), Row(1001, 65.0, "OCbb") },
 			Path.Combine(dir, GhostDb.MergeFileName(yesterday)));
-		GhostDb.Write(new List<Entry> { Row(2000, 30.0, "ODcc") }, Path.Combine(dir, "new.gdb"));
+		GhostDb.Write(new List<Entry> { Row(2000, 62.0, "ODcc") }, Path.Combine(dir, "new.gdb"));
 
-		int code = Merger.RunMerge(dir, keepD: 4, _log, _err, today);
+		int code = Merger.RunMerge(dir, keepD: 4, minR: 60.0, _log, _err, today);
 
 		Assert.Equal(0, code);
 		GhostDb.ReadResult merged = GhostDb.Read(Path.Combine(dir, GhostDb.MergeFileName(today)));
@@ -188,10 +236,25 @@ public class RunMergeTests
 		GhostDb.Write(new List<Entry> { Row(1, 1, "OCaa") }, Path.Combine(dir, "good.gdb"));
 		File.WriteAllBytes(Path.Combine(dir, "bad.gdb"), new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
 
-		int code = Merger.RunMerge(dir, keepD: 4, _log, _err, today);
+		int code = Merger.RunMerge(dir, keepD: 4, minR: 60.0, _log, _err, today);
 
 		Assert.Equal(1, code);
 		Assert.Contains("bad.gdb", _err.ToString());
 		Assert.False(File.Exists(Path.Combine(dir, GhostDb.MergeFileName(today))), "nothing must be written on failure");
+	}
+
+	[Fact]
+	public void RunMerge_prints_floor_cut_next_to_window_line()
+	{
+		DateOnly today = new(2026, 1, 10);
+		string dir = TempFolder();
+		GhostDb.Write(new List<Entry> { Row(1000, 70.0, "OCaa"), Row(1001, 50.0, "OCbb") }, Path.Combine(dir, "a.gdb"));
+		GhostDb.Write(new List<Entry> { Row(2000, 65.0, "ODcc") }, Path.Combine(dir, "b.gdb"));
+
+		int code = Merger.RunMerge(dir, keepD: 4, minR: 60.0, _log, _err, today);
+
+		Assert.Equal(0, code);
+		Assert.Contains("Version window cut", _log.ToString());
+		Assert.Contains("Rating floor 60 cut 1", _log.ToString());
 	}
 }
