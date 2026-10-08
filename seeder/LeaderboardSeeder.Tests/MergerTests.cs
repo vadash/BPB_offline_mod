@@ -10,6 +10,8 @@ namespace LeaderboardSeeder.Tests;
 // Seam: Merger.Merge — dedup + filter over rows read from ghost DBs.
 public class MergerTests
 {
+	private static readonly ItemBook Book = ItemBook.Load();
+
 	private static Entry Row(ulong steamId, double r, string d, string? metadata = null) =>
 		new(steamId, 0, 0, r, d, metadata ?? "{\"d\":\"" + d + "\",\"r\":" +
 			r.ToString(System.Globalization.CultureInfo.InvariantCulture) + ",\"p\":\"P" + steamId + "\"}");
@@ -144,11 +146,48 @@ public class MergerTests
 		Assert.Equal(3, result.Kept.Count);
 		Assert.Equal(0, result.FloorCut);
 	}
+
+	[Fact]
+	public void Merged_output_is_byte_identical_to_direct_write()
+	{
+		// Merger and seeder share the single writer path, so the same rows in
+		// merge output order must produce the very same bytes.
+		List<Entry> rows = new List<Entry>
+		{
+			Row(2000, 90.0, "ODcc"),
+			Row(1000, 70.0, "OCaa"),
+			Row(1001, 70.0, "OCbb"),
+			Row(3000, 60.0, "OEdd"),
+		};
+		var inputs = new List<(string, IReadOnlyList<Entry>, int)>
+		{
+			Input("a.gdb", 0, rows.ToArray()),
+		};
+
+		Merger.MergeResult result = Merger.Merge(inputs, keepD: 4, minR: 0);
+
+		string direct = TempFile("direct");
+		string merged = TempFile("merged");
+		GhostDb.Write(rows, direct, Book);
+		GhostDb.Write(result.Kept.ToList(), merged, Book);
+
+		Assert.Equal(rows.Select(e => e.SteamId), result.Kept.Select(e => e.SteamId));
+		Assert.Equal(File.ReadAllBytes(direct), File.ReadAllBytes(merged));
+	}
+
+	private static string TempFile(string name)
+	{
+		string dir = Path.Combine(Path.GetTempPath(), "bpb-merge-tests", Guid.NewGuid().ToString("N"));
+		Directory.CreateDirectory(dir);
+		return Path.Combine(dir, name + ".gdb");
+	}
 }
 
 // Seam: Merger.RunMerge — folder scan, per-file read, write; console behavior excluded.
 public class RunMergeTests
 {
+	private static readonly ItemBook Book = ItemBook.Load();
+
 	private readonly StringWriter _log = new();
 	private readonly StringWriter _err = new();
 
@@ -168,7 +207,7 @@ public class RunMergeTests
 	{
 		DateOnly today = new(2026, 1, 10);
 		string dir = TempFolder();
-		GhostDb.Write(new List<Entry> { Row(1, 1, "OCaa") }, Path.Combine(dir, "only.gdb"));
+		GhostDb.Write(new List<Entry> { Row(1, 1, "OCaa") }, Path.Combine(dir, "only.gdb"), Book);
 
 		int code = Merger.RunMerge(dir, keepD: 4, minR: 60.0, _log, _err, today);
 
@@ -190,8 +229,8 @@ public class RunMergeTests
 	{
 		DateOnly today = new(2026, 1, 10);
 		string dir = TempFolder();
-		GhostDb.Write(new List<Entry> { Row(1000, 70.0, "OCaa"), Row(1001, 65.0, "OCbb") }, Path.Combine(dir, "a.gdb"));
-		GhostDb.Write(new List<Entry> { Row(1000, 70.0, "OCaa"), Row(2000, 62.0, "ODcc") }, Path.Combine(dir, "b.gdb"));
+		GhostDb.Write(new List<Entry> { Row(1000, 70.0, "OCaa"), Row(1001, 65.0, "OCbb") }, Path.Combine(dir, "a.gdb"), Book);
+		GhostDb.Write(new List<Entry> { Row(1000, 70.0, "OCaa"), Row(2000, 62.0, "ODcc") }, Path.Combine(dir, "b.gdb"), Book);
 		string output = Path.Combine(dir, "ghosts-merged-10-01-26.gdb");
 		// A garbage same-day output must not poison the rerun: it is the
 		// merge target, excluded from the input scan.
@@ -217,8 +256,8 @@ public class RunMergeTests
 		DateOnly yesterday = today.AddDays(-1);
 		string dir = TempFolder();
 		GhostDb.Write(new List<Entry> { Row(1000, 70.0, "OCaa"), Row(1001, 65.0, "OCbb") },
-			Path.Combine(dir, GhostDb.MergeFileName(yesterday)));
-		GhostDb.Write(new List<Entry> { Row(2000, 62.0, "ODcc") }, Path.Combine(dir, "new.gdb"));
+			Path.Combine(dir, GhostDb.MergeFileName(yesterday)), Book);
+		GhostDb.Write(new List<Entry> { Row(2000, 62.0, "ODcc") }, Path.Combine(dir, "new.gdb"), Book);
 
 		int code = Merger.RunMerge(dir, keepD: 4, minR: 60.0, _log, _err, today);
 
@@ -233,7 +272,7 @@ public class RunMergeTests
 	{
 		DateOnly today = new(2026, 1, 10);
 		string dir = TempFolder();
-		GhostDb.Write(new List<Entry> { Row(1, 1, "OCaa") }, Path.Combine(dir, "good.gdb"));
+		GhostDb.Write(new List<Entry> { Row(1, 1, "OCaa") }, Path.Combine(dir, "good.gdb"), Book);
 		File.WriteAllBytes(Path.Combine(dir, "bad.gdb"), new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
 
 		int code = Merger.RunMerge(dir, keepD: 4, minR: 60.0, _log, _err, today);
@@ -248,8 +287,8 @@ public class RunMergeTests
 	{
 		DateOnly today = new(2026, 1, 10);
 		string dir = TempFolder();
-		GhostDb.Write(new List<Entry> { Row(1000, 70.0, "OCaa"), Row(1001, 50.0, "OCbb") }, Path.Combine(dir, "a.gdb"));
-		GhostDb.Write(new List<Entry> { Row(2000, 65.0, "ODcc") }, Path.Combine(dir, "b.gdb"));
+		GhostDb.Write(new List<Entry> { Row(1000, 70.0, "OCaa"), Row(1001, 50.0, "OCbb") }, Path.Combine(dir, "a.gdb"), Book);
+		GhostDb.Write(new List<Entry> { Row(2000, 65.0, "ODcc") }, Path.Combine(dir, "b.gdb"), Book);
 
 		int code = Merger.RunMerge(dir, keepD: 4, minR: 60.0, _log, _err, today);
 

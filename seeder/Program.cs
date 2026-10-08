@@ -400,7 +400,7 @@ internal class Program
 			Console.WriteLine($"     {stat.Code}  kept {stat.Kept,7:N0}  cut {stat.Total - stat.Kept,7:N0}  total {stat.Total,8:N0}");
 		}
 		Console.Write("[..] Writing " + text + " ...");
-		int n = GhostDb.Write(filtered.Kept, text, (done, total) =>
+		int n = GhostDb.Write(filtered.Kept, text, ItemBook.Load(), (done, total) =>
 		{
 			if (done % 10000 == 0)
 			{

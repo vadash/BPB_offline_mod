@@ -125,7 +125,7 @@ internal static class Merger
 			log.WriteLine($"[..] Rating floor {minR.ToString(System.Globalization.CultureInfo.InvariantCulture)} cut {result.FloorCut:N0}.");
 
 			log.Write("[..] Writing " + outputPath + " ...");
-			GhostDb.Write(result.Kept, outputPath, (done, total) =>
+			GhostDb.Write(result.Kept, outputPath, ItemBook.Load(), (done, total) =>
 			{
 				if (done % 10000 == 0)
 				{

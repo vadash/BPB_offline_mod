@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <None Include="Fixtures\*.gdb" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\mod\tests\fixtures\item_book_dump.json" Link="item_book_dump.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
