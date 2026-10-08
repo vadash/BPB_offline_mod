@@ -128,6 +128,25 @@ func decode_item_names(round_string: String, entry_version: String, item_data):
 	return out
 
 
+# Names for a v2 summary's descriptor indexes, resolved through the same
+# per-item-data fact index the decode path builds (no second cache). A v2
+# sweep needs names only — no board bitstreams — so this accessor replaces
+# decode_item_names on that path. Indexes out of range or descriptor-less
+# are skipped: a summary index that cannot name itself cannot match an
+# exclusion, mirroring a null decode round ("cannot match = keep").
+func item_names_for_indexes(indexes: Array, item_data) -> Array:
+	var facts = _facts(item_data)
+	var valid: Array = facts["valid"]
+	var names: Array = facts["names"]
+	var out: Array = []
+	for idx in indexes:
+		var i = int(idx)
+		if i < 0 or i >= valid.size() or not valid[i]:
+			continue
+		out.push_back(names[i])
+	return out
+
+
 static func _binary_ceil(number: float) -> int:
 	# Game parity: BitStream.binaryCeil = pow(2, ceil(log2(n))).
 	return int(pow(2, ceil(log(number) / log(2))))

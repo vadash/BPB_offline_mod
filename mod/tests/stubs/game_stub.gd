@@ -9,6 +9,10 @@ extends Node
 enum RoundResult { Win, Loss, Draw, RunOver }
 const MAX_WINS = 10
 
+# Stub names for the class-exclusion rule label ("class=" + name). The real
+# game supplies its own names in production.
+var _class_names = {0: "Ranger", 1: "Rogue", 2: "Engineer"}
 
-func getClassName(_charClass = 0) -> String:
-	return ""
+
+func getClassName(charClass = 0) -> String:
+	return _class_names.get(int(charClass), "")

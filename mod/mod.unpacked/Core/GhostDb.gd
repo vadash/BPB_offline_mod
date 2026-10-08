@@ -19,6 +19,10 @@ extends Reference
 
 const MAGIC = "BGDB"
 const FORMAT_VERSION = 1
+# The seeder writes v2 (adds per-row exclusion summaries after the v1
+# arrays); v1 DBs in the wild stay readable. FORMAT_VERSION stays the base
+# version the gate-fail string has always reported.
+const FORMAT_VERSIONS = [1, 2]
 
 # Probe cap: runs examined oldest-d first before giving up (the old SQL
 # LIMIT 200 on the probe query).
@@ -77,6 +81,7 @@ var _blob_offsets: Array = []    # GDScript ints (u64 file offsets), exact
 var _d_codes: PoolByteArray = PoolByteArray()        # u8[N], version-table idx
 var _d_order: PoolIntArray = PoolIntArray()          # u32[N], (d, index) order
 var _r_values: Array = []        # GDScript floats (file f64), descending
+var _summary_offsets: Array = [] # v2: u64 file offsets, row i = rank i+1
 
 
 func setup(db_path: String, logger, parse_fn) -> void:
@@ -168,7 +173,7 @@ func load_ghosts(state: Dictionary) -> Dictionary:
 	var rows: Array = swept["rows"]
 	var raw_rows = rows.size()
 	_log.info("query_rows=%d" % raw_rows)
-	var totals = _parse_rows(rows)
+	var totals = _parse_rows(rows, swept.get("summaries"))
 	parse_ms += int(totals["ms"])
 	out["runs"] = totals["runs"]
 	out["json_ok"] = totals["json_ok"]
@@ -187,7 +192,7 @@ func load_ghosts(state: Dictionary) -> Dictionary:
 		io_ms += _ms_since(t0)
 		if fb["hi"] >= fb["lo"]:
 			swept = fb
-		var fb_parsed = _parse_rows(fb["rows"])
+		var fb_parsed = _parse_rows(fb["rows"], fb.get("summaries"))
 		parse_ms += int(fb_parsed["ms"])
 		out["runs"] += fb_parsed["runs"]
 		out["json_ok"] += fb_parsed["json_ok"]
@@ -227,7 +232,7 @@ func load_ghosts(state: Dictionary) -> Dictionary:
 				var rp_rows = _window_rows(side_lo, side_hi, state["player_id"], side_hi - side_lo + 1)
 				var side_io = _ms_since(t0)
 				io_ms += side_io
-				var rp = _parse_rows(rp_rows["rows"])
+				var rp = _parse_rows(rp_rows["rows"], rp_rows.get("summaries"))
 				parse_ms += int(rp["ms"])
 				ring_ms += side_io + int(rp["ms"])
 				out["json_ok"] += rp["json_ok"]
@@ -310,8 +315,8 @@ func _refresh_cache() -> String:
 		_ver = str(ver)
 		if magic == MAGIC:
 			_n = f.get_32()
-			if ver == FORMAT_VERSION:
-				_read_arrays(f)
+			if ver in FORMAT_VERSIONS:
+				_read_arrays(f, ver)
 				_gate_ok = true
 	f.close()
 	if _gate_ok:
@@ -322,10 +327,12 @@ func _refresh_cache() -> String:
 
 
 # Section order (docs/ghost-db-format.md): version table, steam_ids,
-# blob_offsets, d_codes, d_order, r_values. Integer arrays use GDScript's
-# 64-bit int via plain Array (PoolRealArray is f32 and corrupts u64s and
-# offsets above 2^24; PoolIntArray covers the u32 d_order exactly).
-func _read_arrays(f) -> void:
+# blob_offsets, d_codes, d_order, r_values — then, v2 only, summary_offsets
+# (u64[N], file row i's summary record is at summary_offsets[i]). Integer
+# arrays use GDScript's 64-bit int via plain Array (PoolRealArray is f32 and
+# corrupts u64s and offsets above 2^24; PoolIntArray covers the u32 d_order
+# exactly).
+func _read_arrays(f, ver: int) -> void:
 	var vcount = f.get_8()
 	var vbytes = f.get_buffer(2 * vcount)
 	_version_codes = PoolStringArray()
@@ -349,6 +356,49 @@ func _read_arrays(f) -> void:
 	_r_values.resize(_n)
 	for i in range(_n):
 		_r_values[i] = f.get_double()
+	_summary_offsets = []
+	if ver == 2:
+		_summary_offsets.resize(_n)
+		for i in range(_n):
+			_summary_offsets[i] = f.get_64()
+
+
+# v2 summary record for file row i (dense rank i+1): u8 class (255 =
+# classless/unknown), u8 flags (bit0 perfect, bit1 undecodable), LEB128
+# item count, then count LEB128 varints — the first an absolute descriptor
+# index, each next the gap to the previous. Self-delimiting: the count
+# fixes the record length, no end offset needed. Reading summary bytes is
+# not board decoding — the v2 sweep never touches BitStream/BoardDecoder.
+func _read_summary(f, i: int) -> Dictionary:
+	f.seek(int(_summary_offsets[i]))
+	var cls = f.get_8()
+	var flags = f.get_8()
+	var count = _read_uvarint(f)
+	var items: Array = []
+	var prev = 0
+	for k in range(count):
+		var idx = _read_uvarint(f)
+		if k > 0:
+			idx += prev
+		items.push_back(idx)
+		prev = idx
+	return {
+		"class": cls, "perfect": (flags & 1) != 0,
+		"undecodable": (flags & 2) != 0, "items": items,
+	}
+
+
+# Unsigned LEB128: 7-bit little-endian groups, bit 8 continues.
+func _read_uvarint(f) -> int:
+	var value = 0
+	var shift = 0
+	while shift < 64:
+		var b = f.get_8()
+		value |= (b & 0x7F) << shift
+		if (b & 0x80) == 0:
+			break
+		shift += 7
+	return value
 
 
 # COUNT(*) + 1 ghosts above r, via binary search over the descending
@@ -432,16 +482,18 @@ func _window_bounds(rank: int) -> Dictionary:
 # them instead of re-reading them.
 func _window_rows(lo: int, hi: int, player_id: int, limit: int) -> Dictionary:
 	var rows: Array = []
+	var summaries: Array = []
 	var swept_hi = 0
 	if limit <= 0:
-		return {"rows": rows, "lo": 0, "hi": 0}
+		return {"rows": rows, "summaries": summaries, "lo": 0, "hi": 0}
 	var lo_i = max(1, lo) - 1
 	var hi_i = min(hi, _n) - 1
 	if lo_i > hi_i:
-		return {"rows": rows, "lo": 0, "hi": 0}
+		return {"rows": rows, "summaries": summaries, "lo": 0, "hi": 0}
 	var f = File.new()
 	if f.open(_db_path, File.READ) != OK:
-		return {"rows": rows, "lo": 0, "hi": 0}
+		return {"rows": rows, "summaries": summaries, "lo": 0, "hi": 0}
+	var is_v2 = _summary_offsets.size() > 0
 	for i in range(lo_i, hi_i + 1):
 		swept_hi = i + 1
 		if player_id != -1 and int(_steam_ids[i]) == player_id:
@@ -452,10 +504,12 @@ func _window_rows(lo: int, hi: int, player_id: int, limit: int) -> Dictionary:
 		if raw_len <= 10:
 			continue
 		rows.push_back(_blob_string(f, comp_len, raw_len))
+		# v2: the summary record rides along, same array slot as its row.
+		summaries.push_back(_read_summary(f, i) if is_v2 else null)
 		if rows.size() >= limit:
 			break
 	f.close()
-	return {"rows": rows, "lo": max(1, lo), "hi": swept_hi}
+	return {"rows": rows, "summaries": summaries, "lo": max(1, lo), "hi": swept_hi}
 
 
 func _query_runs(rank: int, player_id: int, limit: int) -> Dictionary:
@@ -470,7 +524,7 @@ func _query_runs(rank: int, player_id: int, limit: int) -> Dictionary:
 		var hi_rank = int(_n * 0.75)
 		_log.warn("no_rank using middle-50%% window=[%d-%d] total_rows=%d" % [lo_rank, hi_rank, _n])
 		return _window_rows(lo_rank, hi_rank, player_id, limit)
-	return {"rows": [], "lo": 0, "hi": 0}
+	return {"rows": [], "summaries": [], "lo": 0, "hi": 0}
 
 
 # Decompresses the gzip stream just read at the cursor into a UTF-8 string;
@@ -507,12 +561,13 @@ func _apply_filter(runs: Array, filter_fn) -> Array:
 # parser's own results (plain dictionaries in tests, game run objects in the
 # mod) plus the json/parse counters and its own ms — same keys, same slicing,
 # same failure counting as before the split.
-func _parse_rows(rows: Array) -> Dictionary:
+func _parse_rows(rows: Array, summaries = null) -> Dictionary:
 	var t0 = OS.get_ticks_usec()
 	var json_ok = 0
 	var parse_ok = 0
 	var runs: Array = []
-	for meta in rows:
+	for ri in range(rows.size()):
+		var meta = rows[ri]
 		var parsed = JSON.parse(meta)
 		if parsed.error == OK and typeof(parsed.result) == TYPE_DICTIONARY:
 			json_ok += 1
@@ -520,6 +575,14 @@ func _parse_rows(rows: Array) -> Dictionary:
 			dict["ugc"] = 1
 			var runData = _parse_fn.call_func(dict)
 			if runData:
+				if summaries != null and ri < summaries.size() and summaries[ri] != null:
+					# v2: the summary rides the parsed run — dictionaries
+					# take the key, game RunData objects take an Object meta
+					# (they have no such declared member to set).
+					if typeof(runData) == TYPE_DICTIONARY:
+						runData["_summary"] = summaries[ri]
+					else:
+						runData.set_meta("_summary", summaries[ri])
 				runs.push_back(runData)
 				parse_ok += 1
 			elif parse_ok == 0 and json_ok <= 3:

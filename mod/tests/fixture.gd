@@ -1,12 +1,18 @@
 extends Reference
 
-# Writes throwaway ghost DBs in the seeder's BGDB v1 format
+# Writes throwaway ghost DBs in the seeder's BGDB format
 # (docs/ghost-db-format.md): little-endian, dense-rank arrays, gzip metadata
 # blobs. format_version is parameterized because tests exercise both the
-# matching and the mismatching schema gate. The row dicts keep the old
+# matching and the mismatching schema gate; v2 additionally writes the
+# per-run summary section (offsets + adjacent records), so reader tests can
+# build v1 and v2 from the same rows. This is test-side emission only — the
+# production writer is the seeder's GhostDb.cs. The row dicts keep the old
 # column-shaped keys; "rank" orders the file (stable sort, mirroring the
 # seeder's dense re-rank 1..N) and is not written; "workshop_id"/"score"/"p"
-# are accepted for shape parity and dropped (ADR 0003).
+# are accepted for shape parity and dropped (ADR 0003). v2 rows may carry
+# opts.summary = {"class": int, "perfect": bool, "undecodable": bool,
+# "items": Array of descriptor indexes}; rows without it get the classless
+# default record (class 255, no flags, no items).
 
 class PairSort:
 	# Stable comparator: by slot 0, ties by slot 1 (the dense index).
@@ -80,7 +86,23 @@ static func build(path: String, format_version: int, rows: Array) -> bool:
 	r_values.sort()
 
 	# Blob section: framing header (comp_len u32, raw_len u32) + gzip stream.
+	# v2 inserts the summary section (u64[N] offsets + adjacent records)
+	# between r_values and the blobs, so the blobs shift by its size.
+	var summary_payloads = []
+	var summary_rel_offsets = []
+	var payload_size = 0
+	if format_version == 2:
+		for r in order:
+			var payload = _encode_summary(r.get("summary", null))
+			summary_rel_offsets.append(payload_size)
+			summary_payloads.append(payload)
+			payload_size += payload.size()
 	var prefix = 12 + 1 + 2 * codes.size() + 29 * n
+	if format_version == 2:
+		prefix += 8 * n + payload_size
+	# v2: the summary offsets array (8 * n) sits between r_values and the
+	# records, so the records begin at prefix minus the payload size.
+	var record_base = prefix - payload_size
 	var comp_blobs = []
 	var blob_offsets = []
 	var next_off = prefix
@@ -113,9 +135,45 @@ static func build(path: String, format_version: int, rows: Array) -> bool:
 		f.store_32(idx)
 	for i in range(n - 1, -1, -1):
 		f.store_double(r_values[i])
+	if format_version == 2:
+		for off in summary_rel_offsets:
+			f.store_64(record_base + off)
+		for payload in summary_payloads:
+			f.store_buffer(payload)
 	for i in range(n):
 		f.store_32(comp_blobs[i][0].size())
 		f.store_32(comp_blobs[i][1])
 		f.store_buffer(comp_blobs[i][0])
 	f.close()
 	return true
+
+
+# v2 summary record bytes (test-side twin of the seeder's EncodeSummary):
+# u8 class (255 = classless/unknown), u8 flags (bit0 perfect, bit1
+# undecodable), LEB128 item count, then count LEB128 varints — the first an
+# absolute descriptor index, each next the gap to the previous (>= 1).
+# summary is {"class": int, "perfect": bool, "undecodable": bool,
+# "items": Array} or null for the classless default record.
+static func _encode_summary(summary) -> PoolByteArray:
+	var s = {"class": 255, "perfect": false, "undecodable": false, "items": []}
+	if summary != null:
+		for key in summary:
+			s[key] = summary[key]
+	var out = PoolByteArray()
+	out.append(int(s["class"]))
+	out.append((1 if s["perfect"] else 0) | (2 if s["undecodable"] else 0))
+	out = _store_uvarint(out, s["items"].size())
+	var prev = 0
+	for i in range(s["items"].size()):
+		var idx = int(s["items"][i])
+		out = _store_uvarint(out, idx if i == 0 else idx - prev)
+		prev = idx
+	return out
+
+
+static func _store_uvarint(out: PoolByteArray, value: int) -> PoolByteArray:
+	while value >= 0x80:
+		out.append((value & 0x7F) | 0x80)
+		value >>= 7
+	out.append(value)
+	return out

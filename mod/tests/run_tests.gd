@@ -62,15 +62,18 @@ func _initialize() -> void:
 	test_pick_db()
 	test_filter_exclusions()
 	test_refill()
+	test_refill_v2_parity()
 	test_class_anchor()
 	test_golden_db()
 	test_golden_sweep()
+	test_golden_sweep_v2()
 	test_decode_item_names()
 	test_decode_golden_smoke()
 	test_bitstream_port()
 	test_bitstream_reference()
 	test_filter_unknown_item_warn()
 	test_filter_perfect_flag()
+	test_filter_summary_v2()
 	test_push_anchor()
 	print("")
 	print("checks=%d failures=%d" % [checks, failures])
@@ -234,6 +237,17 @@ func test_schema_gate() -> void:
 	})
 	eq(res2.get("reason", "(missing)"), "db_schema_version ver=unknown expected=1",
 		"header too short reports ver=unknown")
+
+	# The seeder writes v2 (per-run exclusion summaries): the gate accepts it
+	# like v1, so a seeder-replaced DB never fails the load.
+	var v2_path = user_path("gate_v2.db")
+	FIXTURE.build(v2_path, 2, [])
+	var g3 = make_ghost(v2_path, user_path("gate_v2.log"))
+	var res3 = g3.db.load_ghosts({
+		"player_r": null, "estimated_rank": -1, "db_row_count": 0,
+		"player_id": -1, "window": 100,
+	})
+	eq(res3.get("ok"), true, "format_version=2 accepted")
 
 # 2. Min-d cutoff probe: rows walked oldest-d first; the first metadata the
 # parser accepts marks the cutoff, cut to 2 chars, with the 1-based scan count.
@@ -460,6 +474,69 @@ func test_refill() -> void:
 	eq(int(res.get("runs")[298]["id"]), 350, "right slab follows the left slab")
 	_fake_filter_kills = {}
 
+# Refill parity across formats: the same 2500 rows built as v1 and as v2
+# (v2 rows carry classless default summaries) must produce identical
+# sweeps — same slab counters, same log fragments, byte-identical pool
+# (ids and r values in order).
+func _refill_load(db_path: String, log_path: String) -> Dictionary:
+	var g = make_ghost(db_path, log_path)
+	return g.db.load_ghosts({
+		"player_r": 1250.0, "estimated_rank": 1250, "db_row_count": 2500,
+		"window": 100, "player_id": 1,
+		"filter_fn": funcref(self, "fake_filter"),
+	})
+
+# Shared assertion block for one refill run; returns [ids, r_values].
+func _refill_assert(res: Dictionary, log_path: String, tag: String) -> Array:
+	var ids = []
+	var rs = []
+	var uniq = {}
+	for run in res.get("runs"):
+		var rid = int(run["id"])
+		ids.append(rid)
+		rs.append(float(run["r"]))
+		uniq[rid] = true
+	eq(ids.size(), 2200, tag + ": refill recovers every non-excluded ghost")
+	eq(uniq.size(), ids.size(), tag + ": refill dedupes every id")
+	ok(not uniq.has(299) and not uniq.has(349), tag + ": primary-window killed ids absent")
+	ok(not uniq.has(2201) and not uniq.has(2449), tag + ": far killed ids absent")
+	ok(uniq.has(1) and uniq.has(250) and uniq.has(298) and uniq.has(350)
+		and uniq.has(2450) and uniq.has(2500),
+		tag + ": survivors at every refill boundary present")
+	var text = log_text(log_path)
+	ok(text.find("filter kept=49 filtered=51") != -1, tag + ": primary filter counts the gutted window")
+	ok(text.find("refill half=2000 lo=1 hi=3250") != -1, tag + ": refill doubles half to cover the whole DB")
+	eq(res.get("json_ok"), 2500, tag + ": slab refill reads every row exactly once")
+	ok(text.find("filter kept=249 filtered=0") != -1, tag + ": left slab sweeps ranks 1..249 with no kills")
+	ok(text.find("filter kept=1902 filtered=249") != -1, tag + ": right slab sweeps ranks 350..2500")
+	eq(ids[0], 250, tag + ": pool opens with the primary-window survivors")
+	eq(ids[49], 1, tag + ": left slab follows the primary survivors")
+	eq(ids[298], 350, tag + ": right slab follows the left slab")
+	return [ids, rs]
+
+func test_refill_v2_parity() -> void:
+	print("[TEST] refill parity (v1 vs v2 build, identical pools and logs)")
+	_fake_filter_kills = {}
+	for id in range(299, 350):
+		_fake_filter_kills[id] = "class=Engineer"
+	for id in range(2201, 2450):
+		_fake_filter_kills[id] = "item=Boot"
+	var rows = []
+	for rank in range(1, 2501):
+		rows.append(FIXTURE.row(100000 + rank, rank,
+			'{"score":%d,"id":%d,"r":%d}' % [rank, rank, rank], {"r": float(rank)}))
+	var v1_path = user_path("refill_v1.db")
+	FIXTURE.build(v1_path, 1, rows)
+	var v2_path = user_path("refill_v2.db")
+	FIXTURE.build(v2_path, 2, rows)
+	var res1 = _refill_load(v1_path, user_path("refill_v1.log"))
+	var res2 = _refill_load(v2_path, user_path("refill_v2.log"))
+	var p1 = _refill_assert(res1, user_path("refill_v1.log"), "v1")
+	var p2 = _refill_assert(res2, user_path("refill_v2.log"), "v2")
+	eq(p2[0], p1[0], "v2 pool ids identical to the v1 run, same order")
+	eq(p2[1], p1[1], "v2 pool r values identical to the v1 run")
+	_fake_filter_kills = {}
+
 # 7b. Exclusion sweep pin: the full golden DB through load_ghosts with no
 # exclusions - the byte-identical pool contract of the load rework (slab
 # refill, char-wise BitStream, item-fact index), pinned in dense order.
@@ -493,6 +570,75 @@ func test_golden_sweep() -> void:
 		108.398895, 82.229489, 294.989475, 147.536184, 223.421581, 185.625563,
 		320.540372, 321.386477, 261.259897, 311.297876,
 	], "survivor set and dense order pinned")
+
+# Sweep pin on the committed v2 fixture: same 64 rows as the v1 golden DB
+# plus per-row summary records. The v2 reader must produce the identical
+# dense-order survivor pool while carrying each row's summary on the run —
+# the sweep decisions for those summaries are slice 2.
+func test_golden_sweep_v2() -> void:
+	print("[TEST] golden sweep pin v2 (summary read, v1 pool parity)")
+	var fixtures = ProjectSettings.globalize_path("res://").plus_file("../../seeder/LeaderboardSeeder.Tests/Fixtures/")
+	var v1_path = fixtures.plus_file("ghosts-fixture-64.gdb")
+	var v2_path = fixtures.plus_file("ghosts-fixture-64-v2.gdb")
+	if not File.new().file_exists(v1_path) or not File.new().file_exists(v2_path):
+		# Committed files; absence is a broken checkout, never a skip.
+		ok(false, "committed fixture missing: " + v2_path)
+		return
+	var state = {
+		"player_r": 270.231926, "estimated_rank": 32, "db_row_count": 64,
+		"player_id": 1, "window": 64,
+	}
+	var g1 = make_ghost(v1_path, user_path("sweep_v1.log"), funcref(self, "golden_parse"))
+	var r1 = g1.db.load_ghosts(state)
+	var g2 = make_ghost(v2_path, user_path("sweep_v2.log"), funcref(self, "golden_parse"))
+	var r2 = g2.db.load_ghosts(state)
+	eq(r2.get("ok"), true, "v2 DB passes the schema gate")
+	eq(r2.get("runs").size(), 64, "every dense row survives an empty exclusion set")
+	var rs1 = []
+	var rs2 = []
+	for run in r1.get("runs"):
+		rs1.append(float(run["r"]))
+	var carried = 0
+	var undecodable = 0
+	var perfects = 0
+	var max_item = 0
+	var hist = {}
+	for run in r2.get("runs"):
+		rs2.append(float(run["r"]))
+		var summary = run.get("_summary")
+		if summary == null:
+			continue
+		carried += 1
+		if summary["undecodable"]:
+			undecodable += 1
+		if summary["perfect"]:
+			perfects += 1
+		var cls = int(summary["class"])
+		hist[cls] = int(hist.get(cls, 0)) + 1
+		for idx in summary["items"]:
+			max_item = max(max_item, int(idx))
+	eq(rs2, rs1, "v2 survivor pool identical to the v1 pin, dense order")
+	eq(carried, 64, "every v2 run carries a summary payload")
+	var v1_carried = 0
+	for run in r1.get("runs"):
+		if run.get("_summary") != null:
+			v1_carried += 1
+	eq(v1_carried, 0, "v1 runs carry no summary payload")
+	# Pins from the committed seeder-written bytes (independent of this
+	# reader): every row's header decodes to a class (none classless), the
+	# class histogram, three rows with a failed board (undecodable marker,
+	# header class kept), no perfect ghost, and the gap-encoded item sets
+	# reaching the highest descriptor index (519 items).
+	var keys = hist.keys()
+	keys.sort()
+	var parts = []
+	for k in keys:
+		parts.append("%d=%d" % [k, hist[k]])
+	eq(parts, ["0=18", "1=8", "2=14", "3=10", "4=2", "5=6", "6=6"],
+		"summary class histogram pinned")
+	eq(undecodable, 3, "three rows carry the undecodable marker")
+	eq(perfects, 0, "no perfect flag set in the fixture")
+	eq(max_item, 518, "gap-encoded item sets reach the highest descriptor index")
 
 # 8. Per-class anchor: switching classes re-estimates the rank from that
 # class's r even when the DB is unchanged, so the window centers on the
@@ -805,6 +951,88 @@ func test_filter_perfect_flag() -> void:
 	var text = log_text(log_path)
 	ok(text.find("filter_malformed") != -1, "non-bool flag warns")
 	ok(text.find("filter loaded classes=0 items=0 perfect=False") != -1, "load line logs the flag")
+	sw.free()
+
+# Test double parked over sw._decoder: counts decode_item_names calls (must
+# stay 0 in a v2 sweep — the summary replaces board decode) and delegates
+# the summary accessor to the real decoder so the item rule resolves live.
+class SpyDecoder:
+	var decode_calls: int = 0
+	var real
+
+	func decode_item_names(_round_string, _entry_version, _item_data):
+		decode_calls += 1
+		return null
+
+	func item_names_for_indexes(indexes, item_data):
+		return real.item_names_for_indexes(indexes, item_data)
+
+# v2 exclusion sweep: with a summary on every run, the real _filter_run
+# decides every rule from it — class from the summary class (255 classless
+# skips), perfect from the flag, items resolved live from descriptor indexes
+# through the facts accessor — and never decodes a board. An undecodable
+# marker keeps the run unless another rule's fields match.
+func test_filter_summary_v2() -> void:
+	print("[TEST] v2 summary sweep (class/perfect/item rules, zero decode)")
+	var db_path = user_path("summary_v2.db")
+	var rows = []
+	for rank in range(1, 13):
+		rows.append(FIXTURE.row(100 + rank, rank, '{"score":%d,"id":%d}' % [rank, rank], {
+			"r": float(rank),
+			"summary": {
+				1: {"class": 2, "perfect": false, "undecodable": false, "items": []},
+				2: {"class": 0, "perfect": true, "undecodable": false, "items": []},
+				3: {"class": 0, "perfect": false, "undecodable": false, "items": [390]},
+				4: {"class": 0, "perfect": false, "undecodable": true, "items": []},
+				5: {"class": 255, "perfect": false, "undecodable": false, "items": []},
+				6: {"class": 0, "perfect": false, "undecodable": false, "items": [390, 505]},
+			}.get(rank),
+		}))
+	FIXTURE.build(db_path, 2, rows)
+
+	# Real adapter, real decoder behind the spy, stubbed ItemBook global.
+	var sw = SteamWorkshopScript.new()
+	var log_path = user_path("summary_v2.log")
+	var dir = Directory.new()
+	if dir.file_exists(log_path):
+		dir.remove(log_path)
+	# Same script resource as SteamWorkshop's own preload, or the typed
+	# `var _log: BbofLog` rejects the instance.
+	var blog = load("res://Core/BbofLog.gd").new()
+	blog.open(log_path)
+	sw._log = blog
+	var filter_path = user_path("summary_v2_filter.json")
+	var f = File.new()
+	f.open(filter_path, File.WRITE)
+	f.store_line(to_json({"exclude_classes": ["Engineer"], "exclude_items": ["False Life"], "exclude_perfect": true}))
+	f.close()
+	sw._filter_path = filter_path
+	sw._load_filter()
+	var spy = SpyDecoder.new()
+	spy.real = BoardDecoderScript.new()
+	sw._decoder = spy
+
+	var g = make_ghost(db_path, log_path)
+	var res = g.db.load_ghosts({
+		"player_r": 6.5, "estimated_rank": 7, "db_row_count": 12,
+		"window": 100, "player_id": 999999,
+		"filter_fn": funcref(sw, "_filter_run"),
+	})
+	var ids = []
+	for run in res.get("runs"):
+		ids.append(int(run["id"]))
+	eq(ids, [4, 5, 7, 8, 9, 10, 11, 12],
+		"summary rules kill class/perfect/item runs, keep classless and undecodable")
+	ok(log_text(log_path).find("filter kept=8 filtered=4") != -1,
+		"filter line counts the summary-driven kills")
+	eq(spy.decode_calls, 0, "v2 sweep never calls decode_item_names")
+
+	# The accessor skips out-of-range and descriptor-less indexes: cannot
+	# match = keep, mirroring a null decode round.
+	eq(spy.real.item_names_for_indexes([0, 331, 519, 390], _items),
+		["Stone", "False Life"], "accessor resolves valid indexes, skips invalid")
+
+	blog.close()
 	sw.free()
 
 # --- BitStream port ----------------------------------------------------------
